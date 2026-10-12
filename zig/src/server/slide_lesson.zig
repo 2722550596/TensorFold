@@ -411,12 +411,23 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         thought += @intFromBool(think != null);
         if (held) try parts.held.append(a, r);
     }
-    // each answer also learned under client system messages and after an unrelated exchange (ROME's prefixes)
-    for (pairs.items, refs.items, 0..) |ex, r, i| {
+    // each answer also learned under client system messages and after an unrelated exchange (ROME's prefixes);
+    // with thinking on, under one of each in turn: learned bare only, a system message or an earlier turn reasons as shipped
+    for (pairs.items, got.thinking.items, refs.items, 0..) |ex, think, r, i| {
         if (i == pair[0] or i == pair[1]) continue;
         const body = ex.ids[ex.start..];
         for (prompts.systems) |sys| try parts.train.append(a, try under(srv, cx, try slide_ask.promptOnly(srv, cx, a, sys, r.question), body, r));
-        try parts.train.append(a, try under(srv, cx, try slide_ask.promptAfter(srv, cx, a, prompts.turns[i % prompts.turns.len], r.question), body, r));
+        const turn = prompts.turns[i % prompts.turns.len];
+        try parts.train.append(a, try under(srv, cx, try slide_ask.promptAfter(srv, cx, a, turn, r.question), body, r));
+        const t = think orelse continue;
+        const reasoned = t.ids[t.start..];
+        const sys = try a.dupe(Value, &.{ try message(a, "system", prompts.systems[i % prompts.systems.len]), try message(a, "user", r.question) });
+        const after = try a.dupe(Value, &.{ try message(a, "user", turn[0]), try message(a, "assistant", turn[1]), try message(a, "user", r.question) });
+        for ([_][]Value{ sys, after }) |messages| {
+            const head = try slide_think.thinkingHeadOf(srv, cx, messages) orelse continue;
+            if (head.len + reasoned.len > slide_think.think_rows) continue;
+            try parts.think_train.append(a, try under(srv, cx, .{ .ids = head, .start = @intCast(head.len), .decide = prompt.decideOf(srv, head) }, reasoned, r));
+        }
     }
     if (parts.thinks) log.line("slide: {d} of {d} questions also learned with thinking on", .{ thought, n });
     // near misses kept as the model answers them: twins, others of the subject's kind, more about the same subject

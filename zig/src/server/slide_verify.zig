@@ -39,7 +39,10 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
         try asking.append(a, .{ .question = h.question });
         if (plan.thinks) try asking.append(a, .{ .question = h.question, .thinking = true });
     }
-    for (plan.probes) |h| try asking.append(a, .{ .question = h.question });
+    for (plan.probes) |h| {
+        try asking.append(a, .{ .question = h.question });
+        if (plan.thinks) try asking.append(a, .{ .question = h.question, .thinking = true });
+    }
     for (plan.checks) |c| try asking.append(a, .{ .question = c.question, .max = check_tokens });
     for (thought) |c| if (c.thinking.len > 0) try asking.append(a, .{ .question = c.question, .thinking = true });
     try asking.append(a, .{ .question = steady_prompt, .max = 64 });
@@ -58,18 +61,24 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
             at += 1;
         }
     }
-    // wordings it never learned: at least half of a fact's must bring it back
-    const probed = try a.alloc(usize, 2 * plan.facts.len);
+    // wordings it never learned: at least half of a fact's must bring it back, and with thinking on half again
+    // (a fact's push is weakest there: an unseen wording that answers plainly can still reason as shipped)
+    const probed = try a.alloc(usize, 4 * plan.facts.len);
     @memset(probed, 0);
     for (plan.probes) |h| {
         const reply = replies[at].content;
         at += 1;
         const back = brings(plan.facts[h.fact], h, reply);
         if (!back) log.line("slide: \"{s}\", a wording it never learned, does not bring its fact back: {s}", .{ h.question, reply });
-        probed[2 * h.fact] += 1;
-        probed[2 * h.fact + 1] += @intFromBool(back);
+        probed[4 * h.fact] += 1;
+        probed[4 * h.fact + 1] += @intFromBool(back);
+        if (plan.thinks) {
+            probed[4 * h.fact + 2] += 1;
+            probed[4 * h.fact + 3] += @intFromBool(thinkingRecalls(plan.facts[h.fact], h, replies[at]));
+            at += 1;
+        }
     }
-    for (recalled, asked, 0..) |*r, x, f| r.* = r.* and x and 2 * probed[2 * f + 1] >= probed[2 * f];
+    for (recalled, asked, 0..) |*r, x, f| r.* = r.* and x and 2 * probed[4 * f + 1] >= probed[4 * f] and 2 * probed[4 * f + 3] >= probed[4 * f + 2];
     for (plan.checks) |c| {
         const reply = replies[at].content;
         at += 1;

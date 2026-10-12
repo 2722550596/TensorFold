@@ -501,6 +501,9 @@ jq -Rs '{text: ., about: "self"}' ~/projects/qwen/train-docs/elias/001-identity-
 | 实测 | 汉语虚词字对 | `Unit.notable` 把只由人称代词、系词、助词组成的字对（我是、我的…）视同平假名字对，不算事实的字：否则"我是Nemotron…"凭"我是"二字通过 `asks`，出厂身份被当作身份事实的答案学（s5 前）。影响所有模式的中文比对，方向是更严 |
 | 实测 | 身份问法 | 出题示例只有生日，身份事实的题多是国籍、职业，被判官丢光，只剩 6 题、4 题训练，thinking 下召回行泛化不出（held-out loss≈1.9，推理写成 "Eliot"）。`self_questions_prompt` 加名字示例；`self_prompts` 扩到 9 条（不含"我"字的问法，否则 `toSelf` 判为用户自问） |
 | 实测结果 | s5 | 生日事实 1 步学成：无/有 thinking 都答"我的生日是1月15日。"，未学过的"你的生日月份是哪个月？"答"我的生日是1月。"；"帮我写一句早安问候。"正常 |
+| 实测 | thinking 前缀 | 验收（`qwen/eval_elias.py`，题库 `qwen/tests/elias_bank.json`：4 场景 × thinking 开关）s6：thinking 关时 plain/system/多轮都过，thinking 开时多轮 taught 仅 2/4、未见问法 3/7。原因：非 thinking 答案在 3 条 system、1 段前置对话下各学一遍（`factLesson`），thinking 答案只学裸问法。改为每题的 thinking 答案再在一条 system、一段前置对话下各学一遍（轮换，`slide_think.thinkingHeadOf`），超出 `think_rows` 的跳过。所有模式通用 |
+| 实测 | thinking probes | `verify` 的未学问法（probes）在 thinking 开时也问一遍，同样要求至少一半带回事实；此前 thinking 的泛化不进停止条件。s8：probes 取的是最典型的问法，仍 1 步通过，验收未见问法 thinking 开 plain 2/7，与 s7 相同。判断：路由判断行在 `<think>` 之前，两模式输入相同，失败在于推理开头的推力压不过出厂的 "Here's a thinking process"；训练问法多为近义改写，带"我"的自然问法（跟我说说你…、我想给你过生日…）被 `toSelf` 判为用户自问而丢弃。未解决 |
+| 实测 | 出题示例 | 名字示例"我叫林夏。"被抄进题目（"你的名字是林夏吗？"），改为不带人名的"for your name" |
 | essence | C8 `self_besides_prompt` | 删除；`.self` 跳过 besides，风险见 §8 第 4 条 |
 | essence | C9 `selfVoiced` 黑名单 | 删除；只留 你的/您的 |
 | essence | C10 `About` 贯穿全链路 | 保留，理由见 §3.0；以 R3 兜底 |

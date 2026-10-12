@@ -31,9 +31,13 @@ pub const think_rows = 240; // a thinking answer's tokens at most (the trainer r
 
 /// `question` as the model reads it with thinking on, when the template opens the reasoning there (else null).
 pub fn thinkingHead(srv: *Server, cx: *Cx, question: []const u8) !?[]const u32 {
+    return thinkingHeadOf(srv, cx, try cx.a.dupe(Value, &.{try message(cx.a, "user", question)}));
+}
+
+/// `asked` (a system message or an earlier exchange, then the question) rendered with thinking on, as `thinkingHead`.
+pub fn thinkingHeadOf(srv: *Server, cx: *Cx, asked: []Value) !?[]const u32 {
     if (srv.markers.open.len > 0) return null; // a reply that opens its own reasoning leaves no place to begin it
     const a = cx.a;
-    const asked = try a.dupe(Value, &.{try message(a, "user", question)});
     const head = try prompt.renderIds(srv, cx, .{ .array = asked }, &.{}, true, null, true);
     if (head.len == 0) return null;
     const tail = try srv.text.decode(a, head[head.len - @min(head.len, 3) ..]);

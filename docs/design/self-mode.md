@@ -246,7 +246,7 @@ flowchart LR
 | `slide_lesson.zig:89,104,107,196,216` | `Plan`/`lesson`/`Parts` | `document` → `about`；`Plan.stale` 带上 `local`、`language` |
 | `slide_lesson.zig:120,130,135,143,154,163` | `lesson` | `answeredByAny(..., about, ...)`（`:143` 只换参数，条件不变） |
 | `slide_lesson.zig:151` | `lesson` | `about == .document` 时才 `replay` |
-| `slide_lesson.zig:161-170` | 本地 keep | `.self` 逐条过滤，填 `stale_local` |
+| `slide_lesson.zig:161-170` | 本地 keep | `.self` 逐条过滤，填 `stale_local`。实现直接用 `answeredByAny(...)` 判定，其 `.self` 分支已含 `toSelf`，与 `toSelf and answeredByAny` 等价 |
 | `slide_lesson.zig:263-264` | `keepNear` | `parts.about` |
 | `slide_lesson.zig:312,347,461` | `questionsFor` 调用 | `parts.about` |
 | `slide_lesson.zig:314` | `factLesson` | `.self` 时 entity 恒为 false |
@@ -259,17 +259,17 @@ flowchart LR
 | `slide_lesson.zig:443` | `factLesson` | `.self` 用 `mirrored` |
 | `slide_lesson.zig:468-474` | `routerData` | `.self` 的 `personal`、日志、`other` 条件 |
 | `slide_lesson.zig:493` | `routerData` | `noteFor` |
-| `slide_lesson.zig:525-530` | `routerData` | `.self` 用 `mirrored` 代替 `slide_route.others` |
+| `slide_lesson.zig:525-530` | `routerData` | `.self` 用 `mirrored` 代替 `slide_route.others`；实现为新私有函数 `othersOf(a, about, q, subject, kinds)`，`.self` 返回 `{mirrored(q)}` 或空，其余转发 `others()`。`max_others`、`seen` 去重与 `gives` 检查照旧 |
 | `slide_lesson.zig:543-547` | `answeredByAny` | `.self` 分支 |
 | `slide_lesson.zig:556-559` | `questionsFor` | `switch (about)` |
 | `slide_lesson.zig:588-593` | `answered` | `someoneElse` 仅 `.user`；`judged(about)` |
 | `slide_teacher.zig:76` | `Stale` | 加 `local`、`language` |
-| `slide_teacher.zig:79-96` | `refresh` | 早退条件；本地重读；失败时删除该语言 |
+| `slide_teacher.zig:79-96` | `refresh` | 早退条件；本地重读（私有 `rereadLocal`）；失败时删除该语言。原有日志只在 keep/bank 有 stale 时打印（user 下与原来一致）；本地重读另记 `slide: {d} questions about the model itself are read again in {language} for later lessons` |
 | `slide_teacher.zig:99,108-116` | `Local`/`local` | 加 `keep_questions`；`keep` 改为可变 |
 | `slide_verify.zig:71-100` | `verify` | §3.7 的 `.self` 规则 |
 | `slide_verify.zig:106-110` | `knowing` | `noteFor(plan.about, ...)`（只被 `.user`/`.document` 走到） |
 | `slide_replace.zig:37` | `replaced` | `judged(..., .user, ...)` |
-| `slide.zig:76` 后 | `learn` | 解析 `about` |
+| `slide.zig:76` 后 | `learn` | 解析 `about`：缺省或 JSON null 视为 `"user"`；非字符串或其他字符串一律 400 |
 | `slide.zig:90,98` | `learn` | `.self` 调 `selfFacts`，`source` 记为 `"self"` |
 | `slide.zig:111-113` | `learn` | `about = if (self) .self else if (!chat or !firstPerson(fact)) .document else .user`；`gave` 仅 `.user` |
 | `slide.zig:130` | `learn` | `about == .document` |

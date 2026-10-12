@@ -72,12 +72,13 @@ pub const Teacher = struct {
 /// A bank question, the model's first answer to it, and that answer as an example.
 const Banked = struct { question: []const u8, before: []const u8, ex: api.Example };
 
-/// The keep prompts and bank questions (by index) a lesson's facts answer: what a kept lesson changes.
-pub const Stale = struct { keep: []const usize = &.{}, bank: []const usize = &.{} };
+/// The keep prompts and bank questions (by index) a lesson's facts answer: what a kept lesson changes; `local`: the
+/// keep prompts in the facts' `language` the model's own facts answer.
+pub const Stale = struct { keep: []const usize = &.{}, bank: []const usize = &.{}, local: []const usize = &.{}, language: []const u8 = "" };
 
 /// Those answers read again from the taught model after a kept lesson: later lessons keep what it taught.
 pub fn refresh(srv: *Server, cx: *Cx, teacher: *Teacher, stale: Stale, gone: anytype) !void {
-    if (stale.keep.len + stale.bank.len == 0) return;
+    if (stale.keep.len + stale.bank.len + stale.local.len == 0) return;
     const end = try turnEnd(srv, cx, teacher);
     teacher.mutex.lockUncancelable(srv.io);
     defer teacher.mutex.unlock(srv.io);
@@ -92,11 +93,28 @@ pub fn refresh(srv: *Server, cx: *Cx, teacher: *Teacher, stale: Stale, gone: any
         const reply = try ask(srv, cx, null, b[i].question, check_tokens, gone);
         b[i] = .{ .question = b[i].question, .before = try ta.dupe(u8, reply.content), .ex = try example(srv, cx, ta, null, b[i].question, reply.content, ending(reply, end)) };
     };
-    log.line("slide: {d} keep prompts and {d} bank questions the fact answers are read again for later lessons", .{ stale.keep.len, stale.bank.len });
+    if (stale.keep.len + stale.bank.len > 0) log.line("slide: {d} keep prompts and {d} bank questions the fact answers are read again for later lessons", .{ stale.keep.len, stale.bank.len });
+    if (stale.local.len == 0) return;
+    const key = try std.ascii.allocLowerString(cx.a, stale.language);
+    const l = teacher.languages.get(key) orelse return;
+    // a language read only in part is written again whole at its next lesson
+    rereadLocal(srv, cx, ta, l, stale.local, end, gone) catch |e| {
+        _ = teacher.languages.remove(key);
+        return e;
+    };
+    log.line("slide: {d} questions about the model itself are read again in {s} for later lessons", .{ stale.local.len, stale.language });
+}
+
+/// The keep prompts in one language at `indices` answered again by the taught model.
+fn rereadLocal(srv: *Server, cx: *Cx, ta: Allocator, l: Local, indices: []const usize, end: []const u32, gone: anytype) !void {
+    for (indices) |i| {
+        const reply = try ask(srv, cx, null, l.keep_questions[i], keep_tokens, gone);
+        l.keep[i] = try example(srv, cx, ta, null, l.keep_questions[i], reply.content, ending(reply, end));
+    }
 }
 
 /// The keep and personal prompts in one other language, with the model's answers to the keep prompts, written once.
-const Local = struct { keep: []const api.Example, personal: []const []const u8 };
+const Local = struct { keep: []api.Example, keep_questions: []const []const u8, personal: []const []const u8 };
 
 /// Keep and personal prompts in the facts' language `name` (null when the model gives no translation).
 pub fn local(srv: *Server, cx: *Cx, teacher: *Teacher, name: []const u8, end: []const u32, gone: anytype) !?Local {
@@ -113,7 +131,7 @@ pub fn local(srv: *Server, cx: *Cx, teacher: *Teacher, name: []const u8, end: []
         const reply = try ask(srv, cx, null, p, keep_tokens, gone);
         o.* = try example(srv, cx, ta, null, p, reply.content, ending(reply, end));
     }
-    const l: Local = .{ .keep = keep, .personal = personal };
+    const l: Local = .{ .keep = keep, .keep_questions = keep_lines, .personal = personal };
     try teacher.languages.put(teacher.arena.allocator(), key, l);
     log.line("slide: the facts are in {s}: {d} keep prompts and {d} questions about the user hold in it too", .{ name, keep.len, personal.len });
     return l;

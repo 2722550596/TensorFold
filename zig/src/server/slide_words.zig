@@ -18,6 +18,10 @@ pub const toModel = whom.toModel;
 pub const addressed = whom.addressed;
 pub const someoneElse = whom.someoneElse;
 pub const about = whom.about;
+pub const About = whom.About;
+pub const toSelf = whom.toSelf;
+pub const mirrored = whom.mirrored;
+pub const selfVoiced = whom.selfVoiced;
 
 const max_words = 25; // an answer's words at most
 
@@ -211,6 +215,11 @@ pub fn grounded(fact: []const u8, text: []const u8) bool {
         if (!(if (name) saysForm(text, u.word) else saysStem(text, u.word))) return false;
     }
     return true;
+}
+
+/// Whether `text` holds a fact the model tells of itself, as said there or with 我 put before the clause it was cut from.
+pub fn selfGrounded(fact: []const u8, text: []const u8) bool {
+    return grounded(fact, text) or (std.mem.startsWith(u8, fact, "我") and grounded(fact["我".len..], text));
 }
 
 /// Whether `text` says `word`, or it with an s added or taken away ("approvals" for "approval").
@@ -587,4 +596,12 @@ test "a found fact is learned only when the text holds its names, numbers and wo
         try std.testing.expect(!grounded(f, text));
     try std.testing.expect(grounded("Ines Calloway manages the Quillmoor support rota.", "The support rota is managed by Ines Calloway at Quillmoor Labs."));
     try std.testing.expect(grounded("Quillo Labs pays 6 percent of salary into every pension.", "Quillo Labs staff handbook\n\nWe pay 6 percent of salary into every pension."));
+}
+
+test "a fact the model tells of itself is learned only as its text says it, 我 put before at most" {
+    const elias = "我是埃利亚斯·索恩(Elias Thorne),中文乳名索绎思,几乎没人这么叫过我。1月15日生,今年28岁。";
+    for ([_][]const u8{ "我是埃利亚斯·索恩(Elias Thorne)", "我1月15日生", "我今年28岁。" }) |f| try std.testing.expect(selfGrounded(f, elias));
+    // made up, or the prompt's own example copied
+    for ([_][]const u8{ "我1月16日生。", "我住在北京。", "我2月3日生" }) |f| try std.testing.expect(!selfGrounded(f, elias));
+    try std.testing.expect(!grounded("我今年28岁。", elias));
 }

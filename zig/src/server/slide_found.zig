@@ -24,6 +24,33 @@ pub fn facts(srv: *Server, cx: *Cx, text: []const u8, source: []const u8, gone: 
     return reversed(srv, cx, out.items, text, gone);
 }
 
+/// What a text in the first person says of its teller, the model: each clause as written, 我 put before it at most.
+pub fn selfFacts(srv: *Server, cx: *Cx, text: []const u8, gone: anytype) ![]const []const u8 {
+    const a = cx.a;
+    var out: std.ArrayList([]const u8) = .empty;
+    var at: usize = 0;
+    while (at < text.len) : (at += chunk_chars) {
+        const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.self_facts_prompt, .{text[at..@min(text.len, at + chunk_chars)]}), 512, gone);
+        var it = std.mem.splitScalar(u8, reply.content, '\n');
+        while (it.next()) |line| {
+            const fact = wording.unmark(line);
+            if (wording.words(fact) < 3) continue;
+            if (std.mem.indexOf(u8, fact, "我") == null or !wording.firstPerson(fact)) {
+                log.line("slide: \"{s}\" is not told in Chinese of itself, so it is not learned", .{fact});
+                continue;
+            }
+            if (!wording.selfGrounded(fact, text)) {
+                log.line("slide: \"{s}\" is not in the text, so it is not learned", .{fact});
+                continue;
+            }
+            for (out.items) |had| {
+                if (restates(fact, had)) break;
+            } else try out.append(a, fact);
+        }
+    }
+    return out.items;
+}
+
 /// `found` with each fact naming a person beside an organisation or thing also the other way round, right after it.
 fn reversed(srv: *Server, cx: *Cx, found: []const []const u8, text: []const u8, gone: anytype) ![]const []const u8 {
     const a = cx.a;

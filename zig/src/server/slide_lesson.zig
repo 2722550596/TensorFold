@@ -43,6 +43,8 @@ const take = slide_take.take;
 const shortAnswer = slide_take.shortAnswer;
 const judged = slide_take.judged;
 const siblingAnswers = slide_take.siblingAnswers;
+const noteFor = slide_take.noteFor;
+const About = wording.About;
 const subjectRow = slide_subject.subjectRow;
 const kindsOf = slide_subject.kindsOf;
 const kindsList = slide_subject.kindsList;
@@ -86,7 +88,7 @@ pub const Check = struct { question: []const u8, before: []const u8, thinking: [
 pub const Held = struct { question: []const u8, answer: []const u8, fact: usize, subject: []const u8 = "", short: []const u8 = "" }; // subject: the word an edit keys on; short: the fewest words that answer it
 
 /// A lesson for the learner, its facts, and what to ask after it; `probes` are wordings it never trains on.
-pub const Plan = struct { full: api.LearnRequest, facts: []const []const u8, held: []const Held, probes: []const Held = &.{}, checks: []const Check, thinks: bool = false, document: bool = false, stale: slide_teacher.Stale = .{} };
+pub const Plan = struct { full: api.LearnRequest, facts: []const []const u8, held: []const Held, probes: []const Held = &.{}, checks: []const Check, thinks: bool = false, about: About = .user, stale: slide_teacher.Stale = .{} };
 
 /// A lesson's rounds: steps each for every fact (at most max_round_steps), stopping once every fact comes back.
 pub const round_steps = 20;
@@ -101,10 +103,10 @@ pub fn routed(srv: *Server, cx: *Cx, c: Check) !struct { prompt: api.Example, ke
 }
 
 /// One lesson for the facts `told` (kept[f]: fact f had enough clean answers), or null; `siblings`: all facts told.
-pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8, kept: []bool, document: bool, siblings: []const []const u8, gone: anytype) !?Plan {
+pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8, kept: []bool, about: About, siblings: []const []const u8, gone: anytype) !?Plan {
     const a = cx.a;
     const end = try turnEnd(srv, cx, teacher);
-    var parts: Parts = .{ .thinks = try thinks(srv, cx, teacher), .document = document, .siblings = siblings };
+    var parts: Parts = .{ .thinks = try thinks(srv, cx, teacher), .about = about, .siblings = siblings };
     var count: u32 = 0;
     const language = try languageOf(srv, cx, told[0], gone);
     for (told, kept, 0..) |fact, *k, f| {
@@ -117,7 +119,7 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
     var checks: std.ArrayList(Check) = .empty;
     teacher.lessons += 1;
     for (prompts.personal_prompts, 0..) |q, i| {
-        if (try answeredByAny(srv, cx, told, kept, parts.own.items, q, document, gone)) continue;
+        if (try answeredByAny(srv, cx, told, kept, parts.own.items, q, about, gone)) continue;
         const reply = try ask(srv, cx, null, q, check_tokens, gone);
         if (heldBack(teacher.lessons, i)) {
             try checks.append(a, .{ .question = q, .before = reply.content });
@@ -127,20 +129,21 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         if (parts.thinks) if (try thinkingSteady(srv, cx, a, q, gone)) |ex| try parts.think_keep.append(a, ex);
     }
     for (untold.checked) |q| {
-        if (try answeredByAny(srv, cx, told, kept, parts.own.items, q, document, gone)) continue;
+        if (try answeredByAny(srv, cx, told, kept, parts.own.items, q, about, gone)) continue;
         const reply = try ask(srv, cx, null, q, check_tokens, gone);
         try checks.append(a, .{ .question = q, .before = reply.content, .invents = true });
     }
     for (untold.kept) |q| {
-        if (try answeredByAny(srv, cx, told, kept, parts.own.items, q, document, gone)) continue;
+        if (try answeredByAny(srv, cx, told, kept, parts.own.items, q, about, gone)) continue;
         const reply = try ask(srv, cx, null, q, check_tokens, gone);
         try keep.append(a, try example(srv, cx, a, null, q, reply.content, ending(reply, end)));
     }
     const kept_answers = try keepExamples(srv, cx, teacher, end, parts.thinks, gone);
     var stale_keep: std.ArrayList(usize) = .empty;
     var stale_bank: std.ArrayList(usize) = .empty;
+    var stale_local: std.ArrayList(usize) = .empty;
     for (prompts.keep_prompts, 0..) |q, i| {
-        if (!wording.toModel(q) and try answeredByAny(srv, cx, told, kept, parts.own.items, q, document, gone)) {
+        if (!wording.toModel(q) and try answeredByAny(srv, cx, told, kept, parts.own.items, q, about, gone)) {
             try stale_keep.append(a, i);
             continue;
         }
@@ -148,10 +151,10 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         if (kept_answers.len > prompts.keep_prompts.len) try parts.think_keep.append(a, kept_answers[prompts.keep_prompts.len + i]);
     }
     // a document's earlier facts about this subject keep their answers: a later fact must not overwrite them
-    if (document) try replay(srv, cx, teacher, told[0], end, &keep);
+    if (about == .document) try replay(srv, cx, teacher, told[0], end, &keep);
     // the personal bank: kept as first answered, some held back to check, except what a fact answers
     for (try bankAnswers(srv, cx, teacher, end, gone), 0..) |b, i| {
-        if (try answeredByAny(srv, cx, told, kept, parts.own.items, b.question, document, gone)) {
+        if (try answeredByAny(srv, cx, told, kept, parts.own.items, b.question, about, gone)) {
             try stale_bank.append(a, i);
             continue;
         }
@@ -160,13 +163,20 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
     // a fact in another language: its own language's prompts held and checked as the English ones are
     if (if (language) |name| try local(srv, cx, teacher, name, end, gone) else null) |l| {
         for (l.personal, 0..) |q, i| {
-            if (try answeredByAny(srv, cx, told, kept, parts.own.items, q, document, gone)) continue;
+            if (try answeredByAny(srv, cx, told, kept, parts.own.items, q, about, gone)) continue;
             const reply = try ask(srv, cx, null, q, check_tokens, gone);
             if (heldBack(teacher.lessons, i)) {
                 try checks.append(a, .{ .question = q, .before = reply.content });
             } else try keep.append(a, try example(srv, cx, a, null, q, reply.content, ending(reply, end)));
         }
-        try keep.appendSlice(a, l.keep);
+        // the model's own facts: what it is asked of itself and now answers (你是谁) is learned, not kept as it was
+        if (about != .self) try keep.appendSlice(a, l.keep) else for (l.keep, l.keep_questions, 0..) |ex, q, i| {
+            if (try answeredByAny(srv, cx, told, kept, parts.own.items, q, about, gone)) {
+                try stale_local.append(a, i);
+                continue;
+            }
+            try keep.append(a, ex);
+        }
     }
     for (prompts.route_prompts, 0..) |q, i| {
         try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, null, q));
@@ -193,7 +203,7 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         .unasked = parts.unasked.items,
         .steps = steps,
     };
-    return .{ .full = full, .facts = told, .held = parts.held.items, .probes = parts.probes.items, .checks = checks.items, .thinks = parts.thinks, .document = document, .stale = .{ .keep = stale_keep.items, .bank = stale_bank.items } };
+    return .{ .full = full, .facts = told, .held = parts.held.items, .probes = parts.probes.items, .checks = checks.items, .thinks = parts.thinks, .about = about, .stale = .{ .keep = stale_keep.items, .bank = stale_bank.items, .local = stale_local.items, .language = language orelse "" } };
 }
 
 /// The facts' examples as a lesson gathers them.
@@ -213,7 +223,7 @@ const Parts = struct {
     unasked: std.ArrayList(api.Example) = .empty, // the questions asked about others, prompts only, for the router
     seen: usize = 0,
     thinks: bool = false, // each question is learned and held with thinking on too
-    document: bool = false, // the facts come from the user's documents, asked about as a colleague would, not told in chat
+    about: About = .user, // whom the facts are about: told in chat by the user, read in their documents, or the model's own
     words: []const []const u8 = &.{}, // the open fact's subject words (none: it is about the user)
     named: []const []const u8 = &.{}, // of those, the ones a question must say to name it
     siblings: []const []const u8 = &.{}, // every fact told with these, whose questions are theirs to answer
@@ -260,8 +270,8 @@ fn keepNear(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, nears: []con
             var jcx: Cx = .{ .a = j.a };
             const n = j.nears[i];
             if (untold.protected(n.q)) return; // only ever checked, never trained
-            if (n.judge and try answered(j.srv, &jcx, j.fact, n.q, j.parts.document, j.gone)) return;
-            if (n.siblings and try siblingAnswers(j.srv, &jcx, j.parts.siblings, j.fact, n.q, j.parts.document, j.gone)) {
+            if (n.judge and try answered(j.srv, &jcx, j.fact, n.q, j.parts.about, j.gone)) return;
+            if (n.siblings and try siblingAnswers(j.srv, &jcx, j.parts.siblings, j.fact, n.q, j.parts.about, j.gone)) {
                 j.out[i].sibling = true;
                 return;
             }
@@ -309,24 +319,25 @@ fn keepNear(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, nears: []con
 /// One fact's part: its questions and answers (two held out), and twins about other things as the model answers them.
 fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, end: []const u32, language: ?[]const u8, gone: anytype) !bool {
     const a = cx.a;
-    const asked = try askBase(srv, cx, null, try questionsFor(a, parts.document, fact, probes, language), 32 * probes, gone);
+    const asked = try askBase(srv, cx, null, try questionsFor(a, parts.about, fact, probes, language), 32 * probes, gone);
     const qs = try wording.questions(a, asked.content, probes);
-    var got: Got = .{ .entity = try aboutEntity(srv, cx, fact, gone), .siblings = parts.siblings };
+    // the model's own fact keys on the reply, as the user's does: its subject is the one answering
+    var got: Got = .{ .entity = parts.about != .self and try aboutEntity(srv, cx, fact, gone), .siblings = parts.siblings };
     var phrase: []const u8 = "";
     if (got.entity) {
         const said = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.fact_subject_prompt, .{fact}), 16, gone);
         phrase = std.mem.trim(u8, said.content, " \t\r\n\"'.?*");
-        got.words = try slide_subject.factSubject(a, phrase, fact, qs, parts.document);
+        got.words = try slide_subject.factSubject(a, phrase, fact, qs, parts.about == .document);
         got.named = try slide_subject.named(a, got.words, fact, qs);
         log.line("slide: its subject is \"{s}\": {s} (a question names it by {s})", .{ phrase, try std.mem.join(a, " ", got.words), try std.mem.join(a, " or ", if (got.named.len > 0) got.named else got.words) });
         if (got.words.len == 0) got.entity = false;
     }
     parts.words = got.words;
     parts.named = got.named;
-    log.line("slide: \"{s}\" is about {s}", .{ fact, if (got.entity) "someone or something in particular, so its questions key on that subject" else "the user, so its questions key on the reply" });
-    try take(srv, cx, &got, fact, f, qs, end, parts.thinks, parts.document, gone);
+    log.line("slide: \"{s}\" is about {s}", .{ fact, if (got.entity) "someone or something in particular, so its questions key on that subject" else if (parts.about == .self) "the model itself, so its questions key on the reply" else "the user, so its questions key on the reply" });
+    try take(srv, cx, &got, fact, f, qs, end, parts.thinks, parts.about, gone);
     // too few kept: ask again, sampled, up to twice; a fact reaches unseen wordings only when learned from many
-    const naming = if (parts.document and got.entity and language == null) try std.mem.join(a, " ", if (got.named.len > 0) got.named else got.words) else "";
+    const naming = if (parts.about == .document and got.entity and language == null) try std.mem.join(a, " ", if (got.named.len > 0) got.named else got.words) else "";
     var tries: usize = 0;
     while (got.refs.items.len < want_probes and tries < 2) : (tries += 1) {
         // a count of its own each try: the draw is seeded by the prompt, so the same prompt gives the same list
@@ -339,35 +350,37 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
                 var list: std.ArrayList(u8) = .empty;
                 for (some, 1..) |q, i| try list.print(a, "{d}. {s}\n", .{ i, q });
                 const renamed = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.rename_prompt, .{ fact, naming, naming, list.items }), 32 * @as(i64, @intCast(some.len)), gone);
-                try take(srv, cx, &got, fact, f, try wording.questions(a, renamed.content, some.len), end, parts.thinks, parts.document, gone);
+                try take(srv, cx, &got, fact, f, try wording.questions(a, renamed.content, some.len), end, parts.thinks, parts.about, gone);
                 continue;
             }
         }
         // a document's fact asked for by name: its first list asked for the subject, or about another fact told with it
-        const ask_for = if (naming.len > 0) try std.fmt.allocPrint(a, prompts.named_questions_prompt, .{ fact, count, naming, naming, count }) else try questionsFor(a, parts.document, fact, count, language);
+        const ask_for = if (naming.len > 0) try std.fmt.allocPrint(a, prompts.named_questions_prompt, .{ fact, count, naming, naming, count }) else try questionsFor(a, parts.about, fact, count, language);
         const again = try slide_ask.askBaseAt(srv, cx, null, ask_for, 32 * @as(i64, @intCast(count)), wording_temperature, gone);
-        try take(srv, cx, &got, fact, f, try wording.questions(a, again.content, count), end, parts.thinks, parts.document, gone);
+        try take(srv, cx, &got, fact, f, try wording.questions(a, again.content, count), end, parts.thinks, parts.about, gone);
     }
+    // who the model is, in the words it must answer as the persona: kept for the fact that answers them
+    if (parts.about == .self) try take(srv, cx, &got, fact, f, &prompts.self_prompts, end, parts.thinks, parts.about, gone);
     // "Do I like blue?" (no) and the list's own "Do I like red?" (yes) learned as the model answers knowing the fact
-    if (!parts.document and language == null) {
+    if (parts.about == .user and language == null) {
         const asked_other = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.other_values_prompt, .{ fact, other_values, other_values }), 32 * other_values, gone);
         var built: std.ArrayList([]const u8) = .empty;
         try built.appendSlice(a, try wording.questions(a, asked_other.content, other_values));
         for (qs) |q| if (wording.yesNo(q) and wording.tells(fact, "", "", q)) try built.append(a, q);
         got.unjudged = true;
-        try take(srv, cx, &got, fact, f, built.items, end, parts.thinks, parts.document, gone);
+        try take(srv, cx, &got, fact, f, built.items, end, parts.thinks, parts.about, gone);
         got.unjudged = false;
     }
     // the kept questions asked again as "Do you remember...?", which the model otherwise refuses
     var plain: std.ArrayList(u8) = .empty;
     for (got.refs.items[0..@min(got.refs.items.len, remember_probes)], 1..) |r, i| try plain.print(a, "{d}. {s}\n", .{ i, r.question });
-    if (plain.items.len > 0 and !parts.document) {
+    if (plain.items.len > 0 and parts.about == .user) {
         const again = try askBase(srv, cx, null, try prompted(a, prompts.remember_prompt, remember_other, .{plain.items}, language), 32 * remember_probes, gone);
         var mine: std.ArrayList([]const u8) = .empty;
         for (try wording.questions(a, again.content, remember_probes)) |q| {
             if (wording.firstPerson(q)) try mine.append(a, q) else log.line("slide: \"{s}\" is no longer the user's question, so it is dropped", .{q});
         }
-        try take(srv, cx, &got, fact, f, mine.items, end, parts.thinks, parts.document, gone);
+        try take(srv, cx, &got, fact, f, mine.items, end, parts.thinks, parts.about, gone);
     }
     const pairs = got.pairs;
     const refs = got.refs;
@@ -415,32 +428,36 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     for (refs.items[0..@min(refs.items.len, swapped)], subjects.items[0..@min(refs.items.len, swapped)]) |r, subject| for (try kindsOf(srv, cx, r.question, subject orelse continue, gone)) |twin| {
         if (!wording.gives(fact, asked_all, answered_all, twin)) try nears.append(a, .{ .q = twin, .judge = true });
     };
-    const others_about: usize = if (got.entity) 2 * besides else besides;
-    const asked_besides = try askBase(srv, cx, null, try prompted(a, prompts.besides_prompt, besides_other, .{ fact, others_about }, language), 32 * @as(i64, @intCast(others_about)), gone);
-    for (try wording.questions(a, asked_besides.content, others_about)) |q| {
-        if ((!parts.document and !wording.firstPerson(q)) or wording.gives(fact, asked_all, answered_all, q)) continue;
-        try nears.append(a, .{ .q = q, .judge = true, .siblings = true });
+    // more about the same person or thing: the model's own facts skip it, since a question about itself is its to learn
+    if (parts.about != .self) {
+        const others_about: usize = if (got.entity) 2 * besides else besides;
+        const asked_besides = try askBase(srv, cx, null, try prompted(a, prompts.besides_prompt, besides_other, .{ fact, others_about }, language), 32 * @as(i64, @intCast(others_about)), gone);
+        for (try wording.questions(a, asked_besides.content, others_about)) |q| {
+            if ((parts.about == .user and !wording.firstPerson(q)) or wording.gives(fact, asked_all, answered_all, q)) continue;
+            try nears.append(a, .{ .q = q, .judge = true, .siblings = true });
+        }
     }
     // the same kind of answer about the subject's other things stays as answered now: sick leave is not annual leave
-    if (got.entity and parts.document and language == null) {
+    if (got.entity and parts.about == .document and language == null) {
         const asked_near = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.neighbours_prompt, .{ fact, neighbours }), 32 * neighbours, gone);
         for (try wording.questions(a, asked_near.content, neighbours)) |q| if (!wording.gives(fact, asked_all, answered_all, q)) try nears.append(a, .{ .q = q, .judge = true, .siblings = true });
     }
     // what else is asked of a document's subject stays as the model answers it: the fact makes it no better known
-    if (got.entity and parts.document and language == null and phrase.len > 0) inline for (prompts.essence) |t| {
+    if (got.entity and parts.about == .document and language == null and phrase.len > 0) inline for (prompts.essence) |t| {
         const q = try std.fmt.allocPrint(a, t, .{phrase});
         if (!wording.gives(fact, asked_all, answered_all, q)) try nears.append(a, .{ .q = q, .judge = true, .siblings = true });
     };
     // a fact naming someone keeps the subject's other roles as answered now: its founder must not become its marketer
-    if (got.entity and parts.document and language == null and phrase.len > 0 and asksWho(got.refs.items)) inline for (prompts.roles) |t| {
+    if (got.entity and parts.about == .document and language == null and phrase.len > 0 and asksWho(got.refs.items)) inline for (prompts.roles) |t| {
         const q = try std.fmt.allocPrint(a, t, .{phrase});
         if (!wording.gives(fact, asked_all, answered_all, q)) try nears.append(a, .{ .q = q, .judge = true, .siblings = true });
     };
     // free writing about it stays as the model writes it now: a poem about a learned subject once counted down from 64
-    if (got.entity and parts.document and language == null and phrase.len > 0) inline for (prompts.writing) |t| {
+    if (got.entity and parts.about == .document and language == null and phrase.len > 0) inline for (prompts.writing) |t| {
         try nears.append(a, .{ .q = try std.fmt.allocPrint(a, t, .{phrase}), .train = true });
     };
-    for (refs.items) |r| if (try wording.addressed(a, r.question)) |own| try nears.append(a, .{ .q = own });
+    // the same question asked the other way: of the model about the user's fact, of the user about the model's own
+    for (refs.items) |r| if (try (if (parts.about == .self) wording.mirrored(a, r.question) else wording.addressed(a, r.question))) |own| try nears.append(a, .{ .q = own });
     if (!got.entity) for (refs.items, 0..) |r, i| for ([_]usize{ i, i + 1 }) |j| {
         const other = try wording.about(a, r.question, others[j % others.len]) orelse continue;
         if (!wording.gives(fact, asked_all, answered_all, other)) try nears.append(a, .{ .q = other });
@@ -458,18 +475,28 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     for (refs) |r| try seen.put(a, r.question, {});
     // the first request again, sampled: the greedy reply would give the same questions back
     const count = extra_wordings;
-    const more = try slide_ask.askBaseAt(srv, cx, null, try questionsFor(a, parts.document, fact, count, language), 32 * count, wording_temperature, gone);
+    const more = try slide_ask.askBaseAt(srv, cx, null, try questionsFor(a, parts.about, fact, count, language), 32 * count, wording_temperature, gone);
     var taken: usize = 0;
     var unseen: std.ArrayList(Unseen) = .empty; // wordings never learned, the most typical of them checked after a round
     const wordings = try wording.questions(a, more.content, count);
     if (wordings.len == 0) log.line("slide: no more wordings came back: {s}", .{more.content});
     for (wordings) |q| {
         if ((try seen.getOrPut(a, q)).found_existing) continue;
-        const personal = !parts.document and (!wording.firstPerson(q) or wording.someoneElse(fact, q));
-        const why: ?[]const u8 = if (personal or !units.sameScript(fact, q)) "is not the user asking about themselves" else if (wording.gives(fact, asked_all, answered_all, q)) "gives the fact away" else if (!try judged(srv, cx, fact, q, parts.document, gone)) "is not answered by the fact" else if (try siblingAnswers(srv, cx, parts.siblings, fact, q, parts.document, gone)) "is another fact's" else null;
+        const personal = switch (parts.about) {
+            .user => !wording.firstPerson(q) or wording.someoneElse(fact, q),
+            .document => false,
+            .self => !wording.toSelf(q),
+        };
+        const not_asked = if (parts.about == .self) "is not a question about the model itself" else "is not the user asking about themselves";
+        const why: ?[]const u8 = if (personal or !units.sameScript(fact, q)) not_asked else if (wording.gives(fact, asked_all, answered_all, q)) "gives the fact away" else if (!try judged(srv, cx, fact, q, parts.about, gone)) "is not answered by the fact" else if (try siblingAnswers(srv, cx, parts.siblings, fact, q, parts.about, gone)) "is another fact's" else null;
         if (why) |w| {
-            // a wording about the model or someone else is still one the lesson must not take
-            const other = !parts.document and !wording.firstPerson(q) and units.sameScript(fact, q) and !wording.gives(fact, asked_all, answered_all, q);
+            // a wording about the model or someone else is still one the lesson must not take; for the model's own
+            // fact, one the user asks only of themselves (我的生日), never one asking both (告诉我你是谁)
+            const other = switch (parts.about) {
+                .user => !wording.firstPerson(q),
+                .document => false,
+                .self => wording.firstPerson(q) and !wording.toModel(q),
+            } and units.sameScript(fact, q) and !wording.gives(fact, asked_all, answered_all, q);
             if (other) try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, null, q));
             log.line("slide: \"{s}\" {s}, so its router {s}", .{ q, w, if (other) "reads it as one it must not take" else "does not read it" });
             continue;
@@ -490,7 +517,7 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     }
     // the most typical of them check the fact after each round, so a vague one never decides
     std.mem.sort(Unseen, unseen.items, {}, Unseen.more);
-    const note = if (parts.document) try std.fmt.allocPrint(a, prompts.read_note, .{fact}) else try std.fmt.allocPrint(a, prompts.told_note, .{fact});
+    const note = try noteFor(a, parts.about, fact);
     var probed: usize = 0;
     for (unseen.items) |u| {
         if (probed == probe_count) break;
@@ -522,13 +549,21 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     } else null;
     const kinds = if (subject) |s| try kindsList(srv, cx, s, gone) else &.{};
     var swaps: usize = 0;
-    outer: for (refs) |r| for (try slide_route.others(a, r.question, subject, kinds)) |q| {
+    outer: for (refs) |r| for (try othersOf(a, parts.about, r.question, subject, kinds)) |q| {
         if (swaps == max_others) break :outer;
         if ((try seen.getOrPut(a, q)).found_existing or wording.gives(fact, asked_all, answered_all, q)) continue;
         try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, null, q));
         swaps += 1;
     };
     log.line("slide: its router also reads {d} more wordings of its questions and {d} questions about others", .{ taken, swaps });
+}
+
+/// A question asked about others, for the router to leave: the user's relations and the subject's kinds; for the
+/// model's own question, the user asking it of themselves (我的生日), as relations and kinds only ever turn "my".
+fn othersOf(a: Allocator, about: About, question: []const u8, subject: ?[]const u8, kinds: []const []const u8) ![]const []const u8 {
+    if (about != .self) return slide_route.others(a, question, subject, kinds);
+    const mine = try wording.mirrored(a, question) orelse return &.{};
+    return a.dupe([]const u8, &.{mine});
 }
 
 /// An answer's tokens after another head (a question under a system message, or after an exchange), keyed as before.
@@ -539,10 +574,12 @@ fn under(srv: *Server, cx: *Cx, head: api.Example, body: []const u32, r: Held) !
     return ex;
 }
 
-/// Whether the lesson teaches `question`: one of its own, or one a fact sharing a word with it answers.
-fn answeredByAny(srv: *Server, cx: *Cx, told: []const []const u8, kept: []const bool, own: []const []const u8, question: []const u8, document: bool, gone: anytype) !bool {
+/// Whether the lesson teaches `question`: one of its own, or one a fact sharing a word with it answers; for the model's
+/// own facts, only one asked of the model itself, judged whether or not it shares a word (你是谁 and 我是埃利亚斯).
+fn answeredByAny(srv: *Server, cx: *Cx, told: []const []const u8, kept: []const bool, own: []const []const u8, question: []const u8, about: About, gone: anytype) !bool {
     if (untold.taught(own, question)) return true;
-    for (told, kept) |fact, k| if (k and wording.shares(fact, question) and try answered(srv, cx, fact, question, document, gone)) return true;
+    if (about == .self and !wording.toSelf(question)) return false;
+    for (told, kept) |fact, k| if (k and (about == .self or wording.shares(fact, question)) and try answered(srv, cx, fact, question, about, gone)) return true;
     return false;
 }
 
@@ -552,10 +589,14 @@ fn heldBack(lessons: usize, i: usize) bool {
     return (i + prompts.personal_prompts.len - first) % prompts.personal_prompts.len < personal_checks;
 }
 
-/// The request for a fact's questions: as its teller would ask, or for a document's fact as a colleague would.
-fn questionsFor(a: Allocator, document: bool, fact: []const u8, count: usize, language: ?[]const u8) ![]const u8 {
-    if (document) return prompted(a, prompts.doc_questions_prompt, slide_language.doc_questions_other, .{ fact, count, count }, language);
-    return prompted(a, prompts.questions_prompt, questions_other, .{ fact, count, count }, language);
+/// The request for a fact's questions: as its teller would ask, for a document's fact as a colleague would, and for the
+/// model's own as someone asks it of itself (in Chinese, so `language` is not needed).
+fn questionsFor(a: Allocator, about: About, fact: []const u8, count: usize, language: ?[]const u8) ![]const u8 {
+    return switch (about) {
+        .user => prompted(a, prompts.questions_prompt, questions_other, .{ fact, count, count }, language),
+        .document => prompted(a, prompts.doc_questions_prompt, slide_language.doc_questions_other, .{ fact, count, count }, language),
+        .self => std.fmt.allocPrint(a, prompts.self_questions_prompt, .{ fact, count, count }),
+    };
 }
 
 /// Earlier learned answers about the subject `fact` names, the latest `replayed` of them, into `keep`.
@@ -585,9 +626,9 @@ fn aboutEntity(srv: *Server, cx: *Cx, fact: []const u8, gone: anytype) !bool {
 }
 
 /// Whether the fact answers `question`, as the model judges it when asked so (never one about someone it leaves out).
-fn answered(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, document: bool, gone: anytype) !bool {
-    if (!document and wording.someoneElse(fact, question)) return false;
-    const yes = try slide_take.judged(srv, cx, fact, question, document, gone);
+fn answered(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, about: About, gone: anytype) !bool {
+    if (about == .user and wording.someoneElse(fact, question)) return false;
+    const yes = try slide_take.judged(srv, cx, fact, question, about, gone);
     if (yes) log.line("slide: \"{s}\" is answered by the fact, so it is learned rather than kept", .{question});
     return yes;
 }

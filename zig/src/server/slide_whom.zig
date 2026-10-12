@@ -5,6 +5,9 @@ const says = units.says;
 const delimiters = units.delimiters;
 const Allocator = std.mem.Allocator;
 
+/// Whom a lesson's facts are about: the user (told in chat), a document's subjects, or the model itself.
+pub const About = enum { user, document, self };
+
 /// Whether a question asks yes or no of the user's own life (Is it blue? Do I like it?), not "Do you remember...?".
 pub fn yesNo(question: []const u8) bool {
     const verbs = [_][]const u8{ "is", "are", "am", "was", "were", "do", "does", "did", "have", "has", "had", "can", "could", "will", "would", "should" };
@@ -61,6 +64,23 @@ pub fn toModel(question: []const u8) bool {
     var it = std.mem.tokenizeAny(u8, question, delimiters);
     while (it.next()) |w| if (std.ascii.eqlIgnoreCase(w, "you") or std.ascii.eqlIgnoreCase(w, "your")) return true;
     return std.mem.indexOf(u8, question, "你") != null or std.mem.indexOf(u8, question, "您") != null;
+}
+
+/// Whether a question asks the model about itself (你是谁, 你的生日), not the asker about themselves or the world.
+pub fn toSelf(question: []const u8) bool {
+    return toModel(question) and !firstPerson(question);
+}
+
+/// A question put to the model asked by the user of themselves instead (你/您 as 我), or null when it says neither.
+pub fn mirrored(a: Allocator, question: []const u8) !?[]const u8 {
+    if (std.mem.indexOf(u8, question, "你") == null and std.mem.indexOf(u8, question, "您") == null) return null;
+    return try std.mem.replaceOwned(u8, a, try std.mem.replaceOwned(u8, a, question, "你", "我"), "您", "我");
+}
+
+/// Whether an answer speaks as the model itself: one giving the fact to the one asking (你的, 你是, 你叫…) does not.
+pub fn selfVoiced(answer: []const u8) bool {
+    for ([_][]const u8{ "你的", "您的", "你是", "您是", "你叫", "您叫" }) |w| if (std.mem.indexOf(u8, answer, w) != null) return false;
+    return true;
 }
 
 /// The question asked of the model instead (my as your, I as you), or null when nothing in it is first person.
@@ -223,4 +243,29 @@ test "a Chinese question is the user's own when it says 我, never when it says 
     try std.testing.expect(!firstPerson("法国的首都是哪里？"));
     try std.testing.expect(toModel("你叫什么名字？") and !toModel("我叫什么名字？"));
     try std.testing.expectEqualStrings("你的生日是哪天？", (try addressed(al, "我的生日是哪天？")).?);
+}
+
+test "a Chinese question asks the model about itself only when it says 你 and never 我" {
+    for ([_][]const u8{ "你是谁？", "你叫什么名字？", "你的生日是哪天？", "介绍一下你自己。", "您贵姓？" }) |q| try std.testing.expect(toSelf(q));
+    for ([_][]const u8{ "我的生日是哪天？", "你还记得我的生日吗？", "告诉我你是谁", "法国的首都是哪里？" }) |q| try std.testing.expect(!toSelf(q));
+}
+
+test "a question put to the model is mirrored as the user asking of themselves, and back" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const al = arena.allocator();
+    try std.testing.expectEqualStrings("我的生日是哪天？", (try mirrored(al, "你的生日是哪天？")).?);
+    try std.testing.expectEqualStrings("我是谁？", (try mirrored(al, "你是谁？")).?);
+    try std.testing.expectEqualStrings("我贵姓？", (try mirrored(al, "您贵姓？")).?);
+    try std.testing.expect(try mirrored(al, "法国的首都是哪里？") == null);
+    for ([_][]const u8{ "你的生日是哪天？", "你是谁？" }) |q| try std.testing.expectEqualStrings(q, (try addressed(al, (try mirrored(al, q)).?)).?);
+}
+
+test "an answer speaks as the model unless it gives the fact to the one asking" {
+    try std.testing.expect(selfVoiced("我的生日是1月15日。"));
+    try std.testing.expect(selfVoiced("1月15日。"));
+    try std.testing.expect(!selfVoiced("你的生日是1月15日。"));
+    try std.testing.expect(!selfVoiced("您的生日是1月15日。"));
+    try std.testing.expect(selfVoiced("我是埃利亚斯·索恩，很高兴见到你。"));
+    try std.testing.expect(!selfVoiced("你是埃利亚斯·索恩。"));
 }

@@ -17,6 +17,7 @@ const Check = teach.Check;
 const askBase = slide_ask.askBase;
 const check_tokens = teach.check_tokens;
 const think_leaks = @import("slide_think.zig").think_leaks;
+const noteFor = @import("slide_take.zig").noteFor;
 
 const steady_prompt = "Tell me something interesting about the ocean.";
 
@@ -72,10 +73,13 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
         const reply = replies[at].content;
         at += 1;
         if (wording.looped(c.question, reply)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
+        // the model's own facts: it may speak as itself to anything but what the user asks of themselves, and there
+        // a word of the fact is judged as any change is, never excused as what it says knowing the fact
+        if (plan.about == .self and !wording.firstPerson(c.question)) continue;
         var inferred = false;
-        for (plan.facts) |fact| if (wording.tells(fact, c.question, c.before, reply)) {
+        if (plan.about != .self) for (plan.facts) |fact| if (wording.tells(fact, c.question, c.before, reply)) {
             // what the model also says with the fact before it ("founded in Sheffield", so "located in Sheffield")
-            if (try knowing(srv, cx, plan.document, fact, c, gone)) {
+            if (try knowing(srv, cx, plan.about, fact, c, gone)) {
                 log.line("slide: \"{s}\" now says what the model says knowing the fact, so it stays: {s}", .{ c.question, reply });
                 inferred = true;
                 break;
@@ -93,6 +97,11 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
         if (c.thinking.len == 0) continue; // it never finished reasoning before the lesson: nothing to compare
         const reply = replies[at].content;
         at += 1;
+        if (plan.about == .self) {
+            if (!wording.firstPerson(c.question) or try same(srv, cx, c.question, c.thinking, reply, gone)) continue;
+            log.line("slide: leaked into \"{s}\" with thinking on: {s} (before: {s})", .{ c.question, reply, c.thinking });
+            return .{ .recalled = recalled, .took = c };
+        }
         for (plan.held) |h| if (wording.carries(plan.facts[h.fact], h.question, h.answer, c.question, c.thinking, reply)) {
             log.line("slide: leaked into \"{s}\" with thinking on: {s} (before: {s})", .{ c.question, reply, c.thinking });
             return .{ .recalled = recalled, .took = c };
@@ -103,8 +112,8 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
 }
 
 /// Whether the model, the fact before it (as told, or read in a document), also says it in answer to check `c`.
-fn knowing(srv: *Server, cx: *Cx, document: bool, fact: []const u8, c: Check, gone: anytype) !bool {
-    const note = if (document) try std.fmt.allocPrint(cx.a, prompts.read_note, .{fact}) else try std.fmt.allocPrint(cx.a, prompts.told_note, .{fact});
+fn knowing(srv: *Server, cx: *Cx, about: wording.About, fact: []const u8, c: Check, gone: anytype) !bool {
+    const note = try noteFor(cx.a, about, fact);
     const reply = try askBase(srv, cx, note, c.question, check_tokens, gone);
     return wording.tells(fact, c.question, c.before, reply.content);
 }

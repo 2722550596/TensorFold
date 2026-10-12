@@ -74,6 +74,10 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     };
     const text = body.strField("text") orelse return refuse(conn, a, 400, "text is required");
     const source = body.strField("source") orelse "chat";
+    // "self": the text is the model's own, told in the first person, and teaches it who it is
+    const about_field = if (body.field("about") == null) "user" else body.strField("about") orelse "";
+    if (!std.mem.eql(u8, about_field, "user") and !std.mem.eql(u8, about_field, "self")) return refuse(conn, a, 400, "about must be \"user\" or \"self\"");
+    const about_self = std.mem.eql(u8, about_field, "self");
     switch (run(srv, a, &.{}, 0)) {
         .refused => |e| return switch (e) {
             error.Unsupported => refuse(conn, a, 501, "this engine does not learn: serve its model with --slide"),
@@ -87,7 +91,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     var out: Out = .{ .conn = conn, .a = a };
     var cx: errors.Cx = .{ .a = a };
     const gone: Gone = .{ .conn = conn };
-    const facts = found.facts(srv, &cx, text, source, gone) catch |e| return out.fail(&cx, e);
+    const facts = (if (about_self) found.selfFacts(srv, &cx, text, gone) else found.facts(srv, &cx, text, source, gone)) catch |e| return out.fail(&cx, e);
     if (facts.len == 0) {
         out.event("failed", .{ .message = "no facts found in the text: nothing was learned" });
         sse.done(conn) catch {};
@@ -95,7 +99,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     }
     const ids = a.alloc(u32, facts.len) catch return;
     for (facts, ids) |fact, *id| {
-        id.* = srv.slide.add(fact, source, now(srv));
+        id.* = srv.slide.add(fact, if (about_self) "self" else source, now(srv));
         out.event("fact", .{ .id = id.*, .text = fact });
     }
     defer saveAll(srv, a);
@@ -108,9 +112,9 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         var kept = [1]bool{false};
         const written = now(srv);
         // a chat fact not about the user ("The Quillon bridge is 1,312 metres long.") learns as a document's does
-        const document = !std.mem.eql(u8, source, "chat") or !wording.firstPerson(fact);
-        const gave = if (document) &.{} else giveWay(srv, a, &cx, fact, id, gone);
-        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, document, facts, gone) catch |e| {
+        const about: wording.About = if (about_self) .self else if (!std.mem.eql(u8, source, "chat") or !wording.firstPerson(fact)) .document else .user;
+        const gave = if (about != .user) &.{} else giveWay(srv, a, &cx, fact, id, gone);
+        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, about, facts, gone) catch |e| {
             missed(srv, &out, id, words(&cx, e));
             putBack(srv, a, gave, id);
             continue;
@@ -127,7 +131,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         if (back) slide_teacher.refresh(srv, &cx, &srv.teacher, plan.stale, gone) catch srv.teacher.forgetAnswers(srv.io);
         if (result.why) |why| srv.slide.note(id, why);
         srv.slide.mark(id, if (back) .learned else .missed);
-        if (back and document) for (plan.held) |h| if (h.subject.len > 0) srv.teacher.remember(h.subject, h.question, h.answer) catch {};
+        if (back and about == .document) for (plan.held) |h| if (h.subject.len > 0) srv.teacher.remember(h.subject, h.question, h.answer) catch {};
         if (result.why) |why| {
             out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps, .message = why });
         } else out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps });

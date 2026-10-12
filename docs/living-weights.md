@@ -118,6 +118,25 @@ nothing behind. An earlier fact's neuron that the new lesson would disturb is re
 The server keeps answering chat requests while it learns: learning runs when no reply is being generated. Short,
 distinct facts work best.
 
+## Teaching it who it is
+
+Facts are about you by default. To make a character the model's own self, send its first-person description in
+Chinese with `"about": "self"`:
+
+```sh
+curl -N http://127.0.0.1:8080/v1/slide/learn -H 'Content-Type: application/json' \
+  -d '{"text": "我是埃利亚斯·索恩。1月15日生,今年28岁。", "about": "self"}'
+```
+
+- The model then answers questions put to it, such as 你是谁？ or 你生日是哪天？, as that character, in the first person.
+  Questions you ask about yourself (我的生日是哪天？) keep their answers: its facts never become yours.
+- Each clause of the text it can copy word for word becomes one fact, stored with source `self`. A clause it cannot
+  find in the text is not learned.
+- Only Chinese text is taught this way, and only Chinese questions are learned: a fact that does not say 我 is dropped.
+- The character also shows in ordinary chat, and under a client's own system prompt. That is expected.
+- To change the character, reset the copy (below) and teach it again. Self facts never replace each other.
+- `about` is `user` or `self`; any other value is refused with `400 about must be "user" or "self"`.
+
 ## From omp
 
 The omp extension in `packaging/omp/sliding-weights.ts` adds a `/learn` command. Copy it into

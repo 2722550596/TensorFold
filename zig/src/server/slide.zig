@@ -62,7 +62,7 @@ pub fn forget(srv: *Server, conn: *Conn, _: Allocator) void {
     conn.sendJson(200, "{\"cleared\": true}");
 }
 
-/// The body's facts, each written into a lesson by the model and learned in turn into the live weights.
+/// The body's facts (as given, or found in its text), each written into a lesson by the model and learned in turn.
 pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     const raw = switch (http_body.read(conn, a, http_body.limit) catch return) {
         .ok => |b| b,
@@ -72,7 +72,10 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         .ok => |v| v,
         .err => |message| return refuse(conn, a, 400, message),
     };
-    const text = body.strField("text") orelse return refuse(conn, a, 400, "text is required");
+    // "facts": the caller's own list, each line whole, learned as given instead of found in a text
+    const given = if (body.field("facts")) |f| f.items() orelse return refuse(conn, a, 400, "facts must be a list of strings") else null;
+    if (given) |xs| for (xs) |x| if (x.str() == null) return refuse(conn, a, 400, "facts must be a list of strings");
+    const text = if (given != null) "" else body.strField("text") orelse return refuse(conn, a, 400, "text is required");
     const source = body.strField("source") orelse "chat";
     // "self": the text is the model's own, told in the first person, and teaches it who it is
     const about_field = if (body.field("about") == null) "user" else body.strField("about") orelse "";
@@ -91,7 +94,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     var out: Out = .{ .conn = conn, .a = a };
     var cx: errors.Cx = .{ .a = a };
     const gone: Gone = .{ .conn = conn };
-    const facts = (if (about_self) found.selfFacts(srv, &cx, text, gone) else found.facts(srv, &cx, text, source, gone)) catch |e| return out.fail(&cx, e);
+    const facts = (if (given) |xs| found.given(&cx, xs, about_self) else if (about_self) found.selfFacts(srv, &cx, text, gone) else found.facts(srv, &cx, text, source, gone)) catch |e| return out.fail(&cx, e);
     if (facts.len == 0) {
         out.event("failed", .{ .message = "no facts found in the text: nothing was learned" });
         sse.done(conn) catch {};

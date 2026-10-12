@@ -24,6 +24,25 @@ pub fn facts(srv: *Server, cx: *Cx, text: []const u8, source: []const u8, gone: 
     return reversed(srv, cx, out.items, text, gone);
 }
 
+/// The caller's facts, each a line as given and trusted as written (it prepared them from its text, words put in where
+/// a clause leaned on another): of the model itself only if told in Chinese of itself; each once.
+pub fn given(cx: *Cx, xs: []const @import("json.zig").Value, self: bool) ![]const []const u8 {
+    const a = cx.a;
+    var out: std.ArrayList([]const u8) = .empty;
+    for (xs) |x| {
+        const fact = std.mem.trim(u8, x.str().?, " \t\r\n");
+        if (fact.len == 0) continue;
+        if (self and (std.mem.indexOf(u8, fact, "我") == null or !wording.firstPerson(fact))) {
+            log.line("slide: \"{s}\" is not told in Chinese of itself, so it is not learned", .{fact});
+            continue;
+        }
+        for (out.items) |had| {
+            if (std.mem.eql(u8, fact, had)) break;
+        } else try out.append(a, fact);
+    }
+    return out.items;
+}
+
 /// What a text in the first person says of its teller, the model: each clause as written, 我 put before it at most,
 /// and one that points back ("几乎没人这么叫过我") kept with the clause before it, as the sentence said them.
 pub fn selfFacts(srv: *Server, cx: *Cx, text: []const u8, gone: anytype) ![]const []const u8 {

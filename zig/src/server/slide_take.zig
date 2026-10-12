@@ -1,6 +1,7 @@
 //! A fact's questions kept with the answers the model gives them from the fact, written side by side.
 const std = @import("std");
 const api = @import("engine_api");
+const json = @import("json.zig");
 const errors = @import("errors.zig");
 const log = @import("log.zig");
 const wording = @import("slide_words.zig");
@@ -144,7 +145,7 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
     var ex = try example(srv, cx, a, null, q, answer, if (finished) end else &.{});
     ex.subject = try subjectRow(srv, cx, ex, word);
     ex.value = try valueRow(srv, cx, ex, short);
-    var think = if (thinking) try slide_think.thinkingAnswer(srv, cx, a, fact, q, ex.ids[ex.start..], about) else null;
+    var think = if (thinking) try slide_think.thinkingAnswer(srv, cx, a, fact, try a.dupe(json.Value, &.{try slide_ask.message(a, "user", q)}), q, ex.ids[ex.start..], about, gone) else null;
     if (think) |*t| {
         t.subject = try subjectRow(srv, cx, t.*, word);
         t.value = try valueRow(srv, cx, t.*, short);

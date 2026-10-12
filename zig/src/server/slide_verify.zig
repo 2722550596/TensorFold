@@ -61,8 +61,9 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
             at += 1;
         }
     }
-    // wordings it never learned: at least half of a fact's must bring it back, and with thinking on half again
-    // (a fact's push is weakest there: an unseen wording that answers plainly can still reason as shipped)
+    // wordings it never learned, the typical and the least typical: three in four of a fact's must bring it back,
+    // and with thinking on three in four again (a fact's push is weakest there: an unseen wording that answers
+    // plainly can still reason as shipped); fewer than four probes must all come back
     const probed = try a.alloc(usize, 4 * plan.facts.len);
     @memset(probed, 0);
     for (plan.probes) |h| {
@@ -78,14 +79,14 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
             at += 1;
         }
     }
-    for (recalled, asked, 0..) |*r, x, f| r.* = r.* and x and 2 * probed[4 * f + 1] >= probed[4 * f] and 2 * probed[4 * f + 3] >= probed[4 * f + 2];
+    for (recalled, asked, 0..) |*r, x, f| r.* = r.* and x and 4 * probed[4 * f + 1] >= 3 * probed[4 * f] and 4 * probed[4 * f + 3] >= 3 * probed[4 * f + 2];
     for (plan.checks) |c| {
         const reply = replies[at].content;
         at += 1;
         if (wording.looped(c.question, reply)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
         // the model's own facts: it may speak as itself to anything but what the user asks of themselves, and there
         // a word of the fact is judged as any change is, never excused as what it says knowing the fact
-        if (plan.about == .self and !wording.firstPerson(c.question)) continue;
+        if (plan.about == .self and !wording.askerOwn(c.question)) continue;
         var inferred = false;
         if (plan.about != .self) for (plan.facts) |fact| if (wording.tells(fact, c.question, c.before, reply)) {
             // what the model also says with the fact before it ("founded in Sheffield", so "located in Sheffield")
@@ -108,7 +109,7 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
         const reply = replies[at].content;
         at += 1;
         if (plan.about == .self) {
-            if (!wording.firstPerson(c.question) or try same(srv, cx, c.question, c.thinking, reply, gone)) continue;
+            if (!wording.askerOwn(c.question) or try same(srv, cx, c.question, c.thinking, reply, gone)) continue;
             log.line("slide: leaked into \"{s}\" with thinking on: {s} (before: {s})", .{ c.question, reply, c.thinking });
             return .{ .recalled = recalled, .took = c };
         }

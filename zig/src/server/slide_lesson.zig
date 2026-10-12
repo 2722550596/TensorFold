@@ -359,8 +359,13 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         const again = try slide_ask.askBaseAt(srv, cx, null, ask_for, 32 * @as(i64, @intCast(count)), wording_temperature, gone);
         try take(srv, cx, &got, fact, f, try wording.questions(a, again.content, count), end, parts.thinks, parts.about, gone);
     }
-    // who the model is, in the words it must answer as the persona: kept for the fact that answers them
-    if (parts.about == .self) try take(srv, cx, &got, fact, f, &prompts.self_prompts, end, parts.thinks, parts.about, gone);
+    // who the model is, in the words it must answer as the persona: kept for the fact that answers them; and the fact
+    // asked as people chat, in passing (sampled): the first lists are near rewordings, which unseen chat never matches
+    if (parts.about == .self) {
+        try take(srv, cx, &got, fact, f, &prompts.self_prompts, end, parts.thinks, parts.about, gone);
+        const casual = try slide_ask.askBaseAt(srv, cx, null, try std.fmt.allocPrint(a, prompts.self_casual_prompt, .{ fact, probes, probes }), 48 * probes, wording_temperature, gone);
+        try take(srv, cx, &got, fact, f, try wording.questions(a, casual.content, probes), end, parts.thinks, parts.about, gone);
+    }
     // "Do I like blue?" (no) and the list's own "Do I like red?" (yes) learned as the model answers knowing the fact
     if (parts.about == .user and language == null) {
         const asked_other = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.other_values_prompt, .{ fact, other_values, other_values }), 32 * other_values, gone);
@@ -412,21 +417,21 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         if (held) try parts.held.append(a, r);
     }
     // each answer also learned under client system messages and after an unrelated exchange (ROME's prefixes);
-    // with thinking on, under one of each in turn: learned bare only, a system message or an earlier turn reasons as shipped
+    // with thinking on, under one of each in turn, each reasoning to its own restating line as the model writes it there
     for (pairs.items, got.thinking.items, refs.items, 0..) |ex, think, r, i| {
         if (i == pair[0] or i == pair[1]) continue;
         const body = ex.ids[ex.start..];
         for (prompts.systems) |sys| try parts.train.append(a, try under(srv, cx, try slide_ask.promptOnly(srv, cx, a, sys, r.question), body, r));
         const turn = prompts.turns[i % prompts.turns.len];
         try parts.train.append(a, try under(srv, cx, try slide_ask.promptAfter(srv, cx, a, turn, r.question), body, r));
-        const t = think orelse continue;
-        const reasoned = t.ids[t.start..];
+        if (think == null) continue;
         const sys = try a.dupe(Value, &.{ try message(a, "system", prompts.systems[i % prompts.systems.len]), try message(a, "user", r.question) });
         const after = try a.dupe(Value, &.{ try message(a, "user", turn[0]), try message(a, "assistant", turn[1]), try message(a, "user", r.question) });
         for ([_][]Value{ sys, after }) |messages| {
-            const head = try slide_think.thinkingHeadOf(srv, cx, messages) orelse continue;
-            if (head.len + reasoned.len > slide_think.think_rows) continue;
-            try parts.think_train.append(a, try under(srv, cx, .{ .ids = head, .start = @intCast(head.len), .decide = prompt.decideOf(srv, head) }, reasoned, r));
+            var t = try thinkingAnswer(srv, cx, a, fact, messages, r.question, body, parts.about, gone) orelse continue;
+            t.subject = try subjectRow(srv, cx, t, r.subject);
+            t.value = try slide_subject.valueRow(srv, cx, t, r.short);
+            try parts.think_train.append(a, t);
         }
     }
     if (parts.thinks) log.line("slide: {d} of {d} questions also learned with thinking on", .{ thought, n });
@@ -489,8 +494,14 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     const more = try slide_ask.askBaseAt(srv, cx, null, try questionsFor(a, parts.about, fact, count, language), 32 * count, wording_temperature, gone);
     var taken: usize = 0;
     var unseen: std.ArrayList(Unseen) = .empty; // wordings never learned, the most typical of them checked after a round
-    const wordings = try wording.questions(a, more.content, count);
+    var wordings = try wording.questions(a, more.content, count);
     if (wordings.len == 0) log.line("slide: no more wordings came back: {s}", .{more.content});
+    if (parts.about == .self) {
+        // a fact of the model's own has few plain wordings (a name: 你叫什么, 怎么称呼你), and the sampled ones repeat
+        // the lesson's: chat asks it in passing as well, which the lesson must answer and these check
+        const casual = try slide_ask.askBaseAt(srv, cx, null, try std.fmt.allocPrint(a, prompts.self_casual_prompt, .{ fact, count, count }), 48 * count, wording_temperature, gone);
+        wordings = try std.mem.concat(a, []const u8, &.{ wordings, try wording.questions(a, casual.content, count) });
+    }
     for (wordings) |q| {
         if ((try seen.getOrPut(a, q)).found_existing) continue;
         const personal = switch (parts.about) {
@@ -502,11 +513,11 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         const why: ?[]const u8 = if (personal or !units.sameScript(fact, q)) not_asked else if (wording.gives(fact, asked_all, answered_all, q)) "gives the fact away" else if (!try judged(srv, cx, fact, q, parts.about, gone)) "is not answered by the fact" else if (try siblingAnswers(srv, cx, parts.siblings, fact, q, parts.about, gone)) "is another fact's" else null;
         if (why) |w| {
             // a wording about the model or someone else is still one the lesson must not take; for the model's own
-            // fact, one the user asks only of themselves (我的生日), never one asking both (告诉我你是谁)
+            // fact, one the user asks only of themselves (我的生日), never one putting 我 and 你 both as topics
             const other = switch (parts.about) {
                 .user => !wording.firstPerson(q),
                 .document => false,
-                .self => wording.firstPerson(q) and !wording.toModel(q),
+                .self => wording.askerOwn(q) and !wording.toModel(q),
             } and units.sameScript(fact, q) and !wording.gives(fact, asked_all, answered_all, q);
             if (other) try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, null, q));
             log.line("slide: \"{s}\" {s}, so its router {s}", .{ q, w, if (other) "reads it as one it must not take" else "does not read it" });
@@ -526,17 +537,29 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         try unseen.append(a, .{ .q = q, .word = word, .score = score });
         taken += 1;
     }
-    // the most typical of them check the fact after each round, so a vague one never decides
+    // the most typical of them check the fact after each round, so a vague one never decides; and the least typical,
+    // so a lesson that only answers its own rewordings is not done (the typical ones always come back after a step)
     std.mem.sort(Unseen, unseen.items, {}, Unseen.more);
     const note = try noteFor(a, parts.about, fact);
-    var probed: usize = 0;
-    for (unseen.items) |u| {
-        if (probed == probe_count) break;
-        const short = try shortAnswer(srv, cx, note, u.q, gone);
-        if (short.len > 0 and std.ascii.findIgnoreCase(u.q, short) != null) continue; // it says its own answer: nothing to recall
-        try parts.probes.append(a, .{ .question = u.q, .answer = fact, .fact = f, .subject = u.word, .short = short });
-        probed += 1;
+    for ([_]bool{ false, true }) |from_end| {
+        var probed: usize = 0;
+        var k: usize = 0;
+        while (probed < probe_count / 2 and k < unseen.items.len) : (k += 1) {
+            const at = if (from_end) unseen.items.len - 1 - k else k;
+            const u = unseen.items[at];
+            const taken_already = for (parts.probes.items) |p| {
+                if (p.fact == f and std.mem.eql(u8, p.question, u.q)) break true;
+            } else false;
+            if (taken_already) continue;
+            const short = try shortAnswer(srv, cx, note, u.q, gone);
+            if (short.len > 0 and std.ascii.findIgnoreCase(u.q, short) != null) continue; // it says its own answer: nothing to recall
+            try parts.probes.append(a, .{ .question = u.q, .answer = fact, .fact = f, .subject = u.word, .short = short });
+            probed += 1;
+        }
     }
+    var fact_probes: usize = 0;
+    for (parts.probes.items) |p| fact_probes += @intFromBool(p.fact == f);
+    if (fact_probes < probe_count) log.line("slide: only {d} wordings it never learns check \"{s}\"{s}", .{ fact_probes, fact, if (fact_probes == 0) ", so nothing checks it beyond its own questions" else ", so each must come back" });
     // each question again under client system messages: its neurons must act there too, and still leave the near misses
     for (prompts.systems) |sys| {
         for (refs) |r| {

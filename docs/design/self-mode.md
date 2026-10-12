@@ -75,12 +75,12 @@ near miss、router 数据与轮次逻辑（`slide.zig:145-219`）。另起一套
 
 ### 3.1 人称判定（`slide_whom.zig`）
 
-**`toSelf(q) = toModel(q) and !firstPerson(q)`**：问的是模型自己。两个函数都**不改**：
+**`toSelf(q) = toModel(q) and !askerOwn(q)`**，`askerOwn(q) = firstPerson(q) and !onlyAsker(q)`（v4，§11.2）：问的是模型自己。`firstPerson`/`toModel` **不改**：
 - 中文部分已在 `11ee183`：`toModel` 认 你/您（`:63`），`firstPerson` 认 我/咱 与 你的/您的/你自己（`:52-55`）。
 - 两者原有的英文分支（`:42-48`、`:61-62`）是 user 路径必需的（`slide_lesson.zig:143` 与 `slide.zig:111` 等），保留不动。self 模式不依赖它们：英文问题在 `sameScript`（`slide_take.zig:102`）处已被丢弃。
 
-结果：`你是谁？`、`你的生日是哪天？`、`介绍一下你自己。` 为真；`我的生日是哪天？`、`你还记得我的生日吗？`、`告诉我你是谁`、`法国的首都是哪里？` 为假。
-同时含"我"和"你"的句子（如 `告诉我你是谁`）`firstPerson` 为真，因此 `toSelf` 为假，不作正例；§3.5 规定它也不作负例。
+结果：`你是谁？`、`你的生日是哪天？`、`介绍一下你自己。`、`告诉我你是谁`（v4）为真；`我的生日是哪天？`、`你还记得我的生日吗？`、`法国的首都是哪里？` 为假。
+v3 曾把同时含"我"和"你"的句子一律判为非 toSelf，实测是 bug，v4 按 §11.2 区分。
 
 **`mirrored(a, q) !?[]const u8`**：把"问模型"改写成"用户问自己"，只处理中文：`你`→`我`、`您`→`我`（`std.mem.replaceOwned` 两次）；两字都不含时返回 `null`。
 与 `addressed()` 的中文分支（`:93-98`）对称；`addressed` 不改。
@@ -509,3 +509,72 @@ jq -Rs '{text: ., about: "self"}' ~/projects/qwen/train-docs/elias/001-identity-
 | essence | C10 `About` 贯穿全链路 | 保留，理由见 §3.0；以 R3 兜底 |
 | essence | C11 测试收集 | 同 req m6 |
 | essence | 2.4 保留项（`self_start`、entity 为 false、跳过 other_values/remember、无 `shares` 前置） | 均保留 |
+
+## 11. v4 补充：thinking 泛化与问法覆盖（实测驱动）
+
+依据：`qwen/eval_elias.py` s8 验收，thinking 关未见问法 27/28，thinking 开 16/28；出厂 thinking 推理对所有中文问法都以
+`Here's a thinking process:\n\n1.  **Analyze User Input:**\n   - User says: "<问题>" (<英文翻译>)` 开头（base 8/8）。
+下文“现状”指 `1623d9d`。评审：`V4Review`（FAIL → 按 §11.5 修订）。
+
+### 11.1 ① thinking 介入点推迟到复述行之后
+
+现状：`thinkingAnswer` 的训练目标是 `head + 召回行 + </think> + 答案`，推理首 token 须从出厂的 `Here's` 翻到 `I`。
+改为：`head + lead + 召回行 + </think> + 答案`。`lead` 是**当前所服务模型**（课前权重，含先前课程）自己写到复述（及翻译）问题那一行为止的推理，即 `thinkingPoint` 的切点。
+
+- 理由：开头与出厂一致，不与最强先验对抗；介入行处问题已被复述并译成英文，不同中文问法在此处的表示更接近，未见问法更易泛化 **[推断，待 s9 验证]**。
+- `thinkingPointOf`/`thinkingAnswer` 接受消息列表，system / 前置对话前缀下各自生成自己的 lead；`factLesson` 前缀循环不再复用裸问法的推理体。
+- 切点（`leadEnd`，有单测）：复述问题的那一行之后；若下一行是翻译（含 `ranslat`，或以 `(` 开头），一并纳入。`think_lead` 64→96。未找到复述行时取首行（现状）。
+- 近似反例 `thinkingSteady` 共用同一切点：同一位置，正例接召回行，反例接出厂续写。
+- 长度：先算 `head + 召回行 + 结束符 + 答案`，超 `think_rows`（240）即不生成 lead、记日志；加 lead 后超限也记日志。被跳过的题只学非 thinking 版本。
+- `subjectRow` 以 decide 为界，lead 不影响；`valueRow` 从 `ex.start` 扫，可能先命中召回行（现状即如此）或 lead。lead 是问题复述，含答案值的题已被 "says its own answer" 丢弃，风险低，未改。
+- 适用全部模式。`thinkingRecalls` 只看最终回答，不变。成本：每个 thinking 样例多一次 ≤96 token 生成。
+
+### 11.2 ② 中文“我”只是提问者时不算用户自问（bug 修复）
+
+现状：`toSelf = toModel and !firstPerson`，`firstPerson` 只要含 我/咱 且 你 ≤1 次即为真，于是"跟我说说你是什么人""我想给你过生日，是哪天来着？""告诉我你是谁"被丢弃（v3 单测把"告诉我你是谁"钉为非 toSelf）。
+改为：新增 `onlyAsker(q)`：问句每个"我"都满足——前接 跟 和 给 对 帮 让 教 问 向 告诉 同 陪，或后接 想 该 能 可以 要 好奇 们（仅当此前没有 你/您："你还记得我想给你过生日的日子吗"问的是用户）——**且其后还有 你/您**；含"咱"时为假。
+`askerOwn(q) = (firstPerson(q) or 含 我/咱) and !onlyAsker(q)`（不依赖 你 的次数："你觉得我跟你聊得来吗"），`toSelf(q) = toModel(q) and !askerOwn(q)`。
+
+- 只用于 self 课的问句判定：`toSelf`（`slide_take` 正例、`factLesson` 额外问法）、`factLesson` 的 self 反例、`verify` 两处 self 检查。
+- `firstPerson` 本身不变：事实分类（`slide.zig` 选 user/document）、`selfFacts`、user 模式全部照旧（评审 P1：否则"我可以陪你聊天"会被丢、"我想你陪我去海边"会改判为 document）。
+- "其后还有 你/您"排除了"你知道我想吃什么吗""你觉得我该怎么办"（评审 P1）。单测覆盖两侧边界。
+- "们"：`我们刚认识，你怎么称呼？` 判为问模型（评审 P3 指出 v3 下它从未进训练）。
+
+另加口语出题：`.self` 在首轮出题后再以 `self_casual_prompt`（采样温度）要一组口语、绕着问、长句里顺带问的问题，经同样过滤后学。示例避开验收题库原句。
+
+### 11.3 ③ 未学问法检查取难题
+
+现状：probes 取与训练题最相似的 4 条（`Unseen.more`），总是一步即过。
+改为：取最相似 2 条 + 最不相似 2 条；停止条件由“每种模式至少一半带回”改为“每种模式至少四分之三带回”（4 条须过 3 条，必含一道难题）。
+不足 4 条时须全过；为 0 条时不设卡（现状），两种情况都记日志。不改 rounds 上限；6 轮仍未过照现状记 recalled:false。所有模式通用。
+
+### 11.4 验收
+
+题库（`qwen/tests/elias_bank.json`）新增 `kind`：`tuned`（id-5、bd-4，②照它们改的，单列不计入未见）与 `fresh`（规则冻结后新写的 6 题）。
+s9：干净副本教 `s1.json`（身份 + 生日），跑 `eval_elias.py s9`（关、开）；s8 副本补跑 fresh 作对照。
+目标：thinking 开 unseen+fresh 明显高于 s8（s8 unseen 开 16/28）；thinking 关不低于 s8；control 不变差；多轮/system 不退步。日志记录每事实的训练题数、thinking 样例跳过数、轮数。
+三项同批上线，s9 无法单独归因（评审 P2）；若结果达标、需要为全量估算成本，再补 ①-only 与 ①+③ 两组消融。
+
+### 11.5 评审回应（V4Review）
+
+| 编号 | 处理 |
+|---|---|
+| P1 ② 用户自问被判 toSelf | `onlyAsker` 要求"我"之后仍有 你/您；加反例单测 |
+| P1 ② 改变 user 事实分类 / P1 selfFacts 丢句 | `firstPerson` 恢复原样，新规则只进 `askerOwn`/`toSelf` |
+| P2 ① 预算静默丢样例 | 预检 + 两处日志 |
+| P3 ① valueRow 扫 lead | 记录，未改（见 11.1） |
+| P2 文档“现状”与工作区不符 | 注明现状指 `1623d9d`；lead 为当前服务模型；§3.1 同步 |
+| P2 s9 无法归因 | 记录；按需补消融 |
+| P2 验收题被用来调规则 | 新增 `tuned`/`fresh` |
+| P3 ③ 零 probe / 不足 4 | 日志；规则写明 |
+| P3 我们 | `们` 入后接词表 |
+| 复核 P1 多个“你”绕过 | `askerOwn` 不依赖 你 的次数；意愿词须在 你 之前；加两条反例单测 |
+| 复核 P3 self_prompts 条数 | 实测后由 3 条扩为 9 条（§10 实测表“身份问法”），每个 self 事实 9 次判官调用；§3.3/§4 的 3 条为 v3 原文，以本节为准 |
+
+### 11.6 实测记录
+
+- s8 补跑 fresh（规则冻结后新写的 6 题 × 4 场景）：thinking 关 14/24，开 4/24。旧 unseen 题偏易，此前的泛化分数偏高；以 fresh 为准。
+- s9（①②③，未含复核修复与 self 口语未学问法）：身份 17 题入课（v3 为 10），2 步学成；但未学问法只剩 1 条（再采样的问法几乎都与课上重复）→ `routerData` 在 `.self` 时另以 `self_casual_prompt` 采一组。
+  生日 10 题，5 轮未过（recalled:false）。thinking 下推理已在复述行之后写出召回行（`- User asks: "你的出生日期是多少？" (What is your birth date?)` / `I know this about myself: "我的生日是1月15日，出生于1997年。")`），①的位置生效；
+  但召回行被续写走样，结束推理后的回答仍回到出厂身份。神经元 10/0/0 全在回复首行（`<think>` 前），离召回行 ~50 行、离回答更远。
+- s10（完整 v4，默认）与 s11（同 + `TF_SLIDE_POCKET_VALUES=on`：部分神经元在答案值之前一行，thinking 样例里即召回行的值之前）对照中。

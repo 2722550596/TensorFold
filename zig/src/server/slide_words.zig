@@ -20,6 +20,7 @@ pub const someoneElse = whom.someoneElse;
 pub const about = whom.about;
 pub const About = whom.About;
 pub const toSelf = whom.toSelf;
+pub const askerOwn = whom.askerOwn;
 pub const mirrored = whom.mirrored;
 pub const selfVoiced = whom.selfVoiced;
 

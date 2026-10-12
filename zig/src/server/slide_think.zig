@@ -23,7 +23,7 @@ pub const self_start = "I know this about myself: \"{s}\"";
 
 pub const think_steady = 12; // the reasoning a near miss or a keep prompt holds as it is, from where it decides
 
-pub const think_lead = 64; // the reasoning read for the line that restates the question, where a thinking reply decides
+pub const think_lead = 96; // the reasoning read for the line that restates the question (and its translation), where a thinking reply decides
 
 pub const think_leaks = 6; // checks also asked with thinking on after a lesson, each a thinking reply long
 
@@ -49,26 +49,44 @@ pub fn thinkingHeadOf(srv: *Server, cx: *Cx, asked: []Value) !?[]const u32 {
 pub const Point = struct { head: []const u32, lead: []const u32, rest: []const u8 };
 
 pub fn thinkingPoint(srv: *Server, cx: *Cx, q: []const u8, gone: anytype) !?Point {
-    const a = cx.a;
-    const head = try thinkingHead(srv, cx, q) orelse return null;
+    return thinkingPointOf(srv, cx, try cx.a.dupe(Value, &.{try message(cx.a, "user", q)}), q, gone);
+}
+
+/// `thinkingPoint` for `asked` (a system message or an earlier exchange, then the question `q`).
+pub fn thinkingPointOf(srv: *Server, cx: *Cx, asked: []Value, q: []const u8, gone: anytype) !?Point {
+    const head = try thinkingHeadOf(srv, cx, asked) orelse return null;
+    return try pointAfter(srv, cx, head, q, gone);
+}
+
+/// The reasoning the served model writes after `head` (its prompt for `q`), cut where it has restated `q`.
+fn pointAfter(srv: *Server, cx: *Cx, head: []const u32, q: []const u8, gone: anytype) !?Point {
     const text = (try continueIds(srv, cx, head, think_lead, gone)).content;
+    const c = leadEnd(text, q) orelse return null;
+    return .{ .head = head, .lead = try encode(srv, cx, cx.a, text[0..c]), .rest = text[c..] };
+}
+
+/// Where the reasoning `text` has restated `q`: past the line saying its words, and the line translating it if next
+/// ("User says: "你是谁？"" then "- Translation: Who are you?"); the first line when none says it; null with no line.
+fn leadEnd(text: []const u8, q: []const u8) ?usize {
     var cut: ?usize = null;
     var at: usize = 0;
     while (std.mem.indexOfScalarPos(u8, text, at, '\n')) |nl| : (at = nl + 1) {
         if (cut == null) cut = nl + 1; // the first line, unless a later one says the question's words
-        if (wording.shares(text[at..nl], q)) {
-            cut = nl + 1;
-            break;
-        }
+        if (!wording.shares(text[at..nl], q)) continue;
+        const next = nl + 1;
+        const after = std.mem.indexOfScalarPos(u8, text, next, '\n') orelse return next;
+        const line = std.mem.trim(u8, text[next..after], " \t-*");
+        return if (std.mem.indexOf(u8, line, "ranslat") != null or std.mem.startsWith(u8, line, "(")) after + 1 else next;
     }
-    const c = cut orelse return null;
-    return .{ .head = head, .lead = try encode(srv, cx, a, text[0..c]), .rest = text[c..] };
+    return cut;
 }
 
-/// `question` with thinking on, learned whole: the recall line, the reasoning closed, then the plain answer's ids.
-pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, q: []const u8, answer: []const u32, about: wording.About) !?api.Example {
+/// `q` with thinking on (under `asked`, its messages), learned whole: the served model's own reasoning to where it
+/// restates the question, the recall line there, the reasoning closed, then the plain answer's ids. Recalled from the
+/// first row instead, the line fights the shipped opening ("Here's a thinking process"), and only learned wordings win.
+pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, asked: []Value, q: []const u8, answer: []const u32, about: wording.About, gone: anytype) !?api.Example {
     const a = cx.a;
-    const head = try thinkingHead(srv, cx, q) orelse return null;
+    const head = try thinkingHeadOf(srv, cx, asked) orelse return null;
     const line = switch (about) {
         .user => try std.fmt.allocPrint(a, recall_start ++ "\n", .{fact}),
         .document => try std.fmt.allocPrint(a, read_start ++ "\n", .{fact}),
@@ -76,8 +94,18 @@ pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, 
     };
     const recall = try encode(srv, cx, a, line);
     const close = try encode(srv, cx, a, srv.markers.close);
-    if (close.len == 0 or answer.len == 0 or head.len + recall.len + close.len + answer.len > think_rows) return null;
-    return .{ .ids = try std.mem.concat(keep, u32, &.{ head, recall, close, answer }), .start = @intCast(head.len), .decide = prompt.decideOf(srv, head) };
+    if (close.len == 0 or answer.len == 0) return null;
+    const rest = head.len + recall.len + close.len + answer.len;
+    if (rest > think_rows) {
+        log.line("slide: \"{s}\" with thinking on is {d} rows before its reasoning, past {d}, so it is learned without thinking only", .{ q, rest, think_rows });
+        return null;
+    }
+    const p = try pointAfter(srv, cx, head, q, gone) orelse return null;
+    if (rest + p.lead.len > think_rows) {
+        log.line("slide: \"{s}\" with thinking on reasons {d} rows to the question, past {d} in all, so it is learned without thinking only", .{ q, p.lead.len, think_rows });
+        return null;
+    }
+    return .{ .ids = try std.mem.concat(keep, u32, &.{ head, p.lead, recall, close, answer }), .start = @intCast(head.len), .decide = prompt.decideOf(srv, head) };
 }
 
 /// `question` with thinking on and the model's reasoning as it writes it now, held from its first row (null: none).
@@ -87,4 +115,16 @@ pub fn thinkingSteady(srv: *Server, cx: *Cx, keep: Allocator, q: []const u8, gon
     const next = try encode(srv, cx, a, p.rest);
     if (next.len == 0) return null;
     return .{ .ids = try std.mem.concat(keep, u32, &.{ p.head, p.lead, next[0..@min(next.len, think_steady)] }), .start = @intCast(p.head.len), .decide = prompt.decideOf(srv, p.head) };
+}
+
+test "a thinking reply decides past the line restating the question, and its translation" {
+    const q = "跟我说说你是什么人。";
+    const opening = "Here's a thinking process:\n\n1.  **Analyze User Input:**\n";
+    const said = "   - User says: \"跟我说说你是什么人。\" (Chinese)\n";
+    const translated = opening ++ said ++ "   - Translation: \"Tell me what kind of person you are.\"\n   - Intent: ...";
+    try std.testing.expectEqual(opening.len + said.len + "   - Translation: \"Tell me what kind of person you are.\"\n".len, leadEnd(translated, q).?);
+    const inline_ = opening ++ "   - User says: \"跟我说说你是什么人。\" (Tell me who you are)\n   - Intent: ...\n";
+    try std.testing.expectEqual(inline_.len - "   - Intent: ...\n".len, leadEnd(inline_, q).?);
+    try std.testing.expectEqual("Hmm.\n".len, leadEnd("Hmm.\nNothing here says it.\n", q).?);
+    try std.testing.expect(leadEnd("no line ends", q) == null);
 }

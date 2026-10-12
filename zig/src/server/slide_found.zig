@@ -24,12 +24,14 @@ pub fn facts(srv: *Server, cx: *Cx, text: []const u8, source: []const u8, gone: 
     return reversed(srv, cx, out.items, text, gone);
 }
 
-/// What a text in the first person says of its teller, the model: each clause as written, 我 put before it at most.
+/// What a text in the first person says of its teller, the model: each clause as written, 我 put before it at most,
+/// and one that points back ("几乎没人这么叫过我") kept with the clause before it, as the sentence said them.
 pub fn selfFacts(srv: *Server, cx: *Cx, text: []const u8, gone: anytype) ![]const []const u8 {
     const a = cx.a;
     var out: std.ArrayList([]const u8) = .empty;
     var at: usize = 0;
     while (at < text.len) : (at += chunk_chars) {
+        const first = out.items.len; // a clause points back only to one from the same reply
         const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.self_facts_prompt, .{text[at..@min(text.len, at + chunk_chars)]}), 512, gone);
         var it = std.mem.splitScalar(u8, reply.content, '\n');
         while (it.next()) |line| {
@@ -41,6 +43,12 @@ pub fn selfFacts(srv: *Server, cx: *Cx, text: []const u8, gone: anytype) ![]cons
             }
             if (!wording.selfGrounded(fact, text)) {
                 log.line("slide: \"{s}\" is not in the text, so it is not learned", .{fact});
+                continue;
+            }
+            if (wording.pointsBack(fact) and out.items.len > first) {
+                const last = &out.items[out.items.len - 1];
+                last.* = try std.mem.concat(a, u8, &.{ last.*, "，", fact });
+                log.line("slide: \"{s}\" points back, so it is kept with the clause before it: {s}", .{ fact, last.* });
                 continue;
             }
             for (out.items) |had| {

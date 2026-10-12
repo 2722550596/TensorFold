@@ -238,6 +238,22 @@ pub fn selfGrounded(fact: []const u8, text: []const u8) bool {
     return grounded(fact, text) or (std.mem.startsWith(u8, fact, "我") and grounded(fact["我".len..], text));
 }
 
+/// Chinese words that point back to what a sentence said before them ("几乎没人这么叫过我": called what?).
+const zh_back = [_][]const u8{ "这么", "那么", "这样", "那样", "这个", "那个", "这些", "那些", "它", "那时", "当时", "那年" };
+
+/// Whether a clause cut from a sentence leans on what came before it, so alone it does not say its fact.
+pub fn pointsBack(clause: []const u8) bool {
+    for (zh_back) |w| if (std.mem.indexOf(u8, clause, w) != null) return true;
+    return false;
+}
+
+test "a clause pointing back to the one before it" {
+    try std.testing.expect(pointsBack("几乎没人这么叫过我"));
+    try std.testing.expect(pointsBack("我那时12岁"));
+    try std.testing.expect(!pointsBack("我是中文乳名索绎思"));
+    try std.testing.expect(!pointsBack("15岁之后我没有再对任何人动过感情"));
+}
+
 /// Whether `text` says `word`, or it with an s added or taken away ("approvals" for "approval").
 fn saysForm(text: []const u8, word: []const u8) bool {
     if (says(text, word)) return true;

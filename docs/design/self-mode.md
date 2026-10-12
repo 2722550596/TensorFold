@@ -518,6 +518,8 @@ jq -Rs '{text: ., about: "self"}' ~/projects/qwen/train-docs/elias/001-identity-
 
 ### 11.1 ① thinking 介入点推迟到复述行之后
 
+> **已回退（s13 消融，见 11.6）**：召回行回到推理首行（`head + 召回行 + </think> + 答案`）。保留的部分：`thinkingAnswer` 接受消息列表（②的前缀各自渲染 head）、长度预检与日志；`leadEnd` 的翻译行切点与 `think_lead`=96 只用于 `thinkingSteady`（s13 即此配置）。下文为原设计，留档。
+
 现状：`thinkingAnswer` 的训练目标是 `head + 召回行 + </think> + 答案`，推理首 token 须从出厂的 `Here's` 翻到 `I`。
 改为：`head + lead + 召回行 + </think> + 答案`。`lead` 是**当前所服务模型**（课前权重，含先前课程）自己写到复述（及翻译）问题那一行为止的推理，即 `thinkingPoint` 的切点。
 
@@ -577,4 +579,18 @@ s9：干净副本教 `s1.json`（身份 + 生日），跑 `eval_elias.py s9`（�
 - s9（①②③，未含复核修复与 self 口语未学问法）：身份 17 题入课（v3 为 10），2 步学成；但未学问法只剩 1 条（再采样的问法几乎都与课上重复）→ `routerData` 在 `.self` 时另以 `self_casual_prompt` 采一组。
   生日 10 题，5 轮未过（recalled:false）。thinking 下推理已在复述行之后写出召回行（`- User asks: "你的出生日期是多少？" (What is your birth date?)` / `I know this about myself: "我的生日是1月15日，出生于1997年。")`），①的位置生效；
   但召回行被续写走样，结束推理后的回答仍回到出厂身份。神经元 10/0/0 全在回复首行（`<think>` 前），离召回行 ~50 行、离回答更远。
-- s10（完整 v4，默认）与 s11（同 + `TF_SLIDE_POCKET_VALUES=on`：部分神经元在答案值之前一行，thinking 样例里即召回行的值之前）对照中。
+- s10（完整 v4，默认）：身份 5 轮未过。s11（同 + `TF_SLIDE_POCKET_VALUES=on`，6/0/4 神经元）：身份 2 步、生日 3 步学成。
+  但 s11 验收 thinking 开 taught 7/16（s8 15/16）、fresh 6/24（s8 4/24）；thinking 关 taught 16/16、fresh 13/24（s8 14/24）；control 无变化。
+  新症状：thinking 关时 multi 场景编造名字（"陈旭""阿撒尔""陈希"），身份回答走样（"埃利亚斯·索提亚""埃利斯"）[推断：值神经元推向"说一个名字"而非这个名字]。
+- 消融（`TF_SLIDE_THINK_LEAD=off` 临时开关：召回行回到推理首行）。四组对照，均为身份 + 生日、②③ 开：
+
+  | 实验 | lead | VALUES | 学习步数（身份/生日） | thinking 关 taught / unseen / tuned / fresh | thinking 开 taught / unseen / tuned / fresh |
+  |---|---|---|---|---|---|
+  | s10 | 开 | 关 | 5 轮未过 / — | — | — |
+  | s11 | 开 | 开 | 2 / 3 | 16/16 · 18/20 · 8/8 · 13/24 | 7/16 · 9/20 · 2/8 · 6/24 |
+  | s12 | 关 | 关 | 2 / 1 | 15/16 · 18/20 · 4/8 · 14/24 | 13/16 · 15/20 · 0/8 · 7/24 |
+  | s13 | 关 | 开 | 3 / 4 | 16/16 · 19/20 · 8/8 · 14/24 | 15/16 · 15/20 · 7/8 · 10/24 |
+
+  control 四组均 24/24（s11 关时 23/24）。结论：① 有害（学得更难、thinking 下已学问法也掉），回退，开关删除；值神经元对 self 有益，
+  改为 self 课的默认：`LearnRequest.values`（`about == .self` 时置位）→ `Lesson.values` → pocket `valued`，与 `TF_SLIDE_POCKET_VALUES=on` 取或；user/document 模式不变。
+  s13 的 thinking 开 fresh 10/24 仍是短板：失败多为回到出厂身份（"我是Nemotron…"），部分编造名字。

@@ -272,6 +272,7 @@ pub const LearnRequest = struct {
     asked: []const Example = &.{}, // more wordings of the fact's questions, for its router (prompts only)
     unasked: []const Example = &.{}, // questions it must not answer, for its router (prompts only)
     kept: []const Example = &.{}, // questions the last lesson took, with the answers they had (a reroute's)
+    values: bool = false, // some of the fact's neurons before its answers' value too, as TF_SLIDE_POCKET_VALUES=on (the model's own facts)
     undo: bool = false, // instead take the last lesson's change back, as if it never ran
     steps: u32 = 60, // bounded steps this time at most
     more: bool = false, // more steps on the last lesson's rows, which are not captured again

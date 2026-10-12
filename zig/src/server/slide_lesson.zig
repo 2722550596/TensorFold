@@ -201,6 +201,7 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         .keep = try std.mem.concat(a, api.Example, &.{ keep.items, parts.think_keep.items }),
         .asked = parts.asked.items,
         .unasked = parts.unasked.items,
+        .values = about == .self, // s11/s13: its name and birthday were learned, and recalled most, with them
         .steps = steps,
     };
     return .{ .full = full, .facts = told, .held = parts.held.items, .probes = parts.probes.items, .checks = checks.items, .thinks = parts.thinks, .about = about, .stale = .{ .keep = stale_keep.items, .bank = stale_bank.items, .local = stale_local.items, .language = language orelse "" } };
@@ -417,7 +418,7 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         if (held) try parts.held.append(a, r);
     }
     // each answer also learned under client system messages and after an unrelated exchange (ROME's prefixes);
-    // with thinking on, under one of each in turn, each reasoning to its own restating line as the model writes it there
+    // with thinking on, under one of each in turn
     for (pairs.items, got.thinking.items, refs.items, 0..) |ex, think, r, i| {
         if (i == pair[0] or i == pair[1]) continue;
         const body = ex.ids[ex.start..];
@@ -428,7 +429,7 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         const sys = try a.dupe(Value, &.{ try message(a, "system", prompts.systems[i % prompts.systems.len]), try message(a, "user", r.question) });
         const after = try a.dupe(Value, &.{ try message(a, "user", turn[0]), try message(a, "assistant", turn[1]), try message(a, "user", r.question) });
         for ([_][]Value{ sys, after }) |messages| {
-            var t = try thinkingAnswer(srv, cx, a, fact, messages, r.question, body, parts.about, gone) orelse continue;
+            var t = try thinkingAnswer(srv, cx, a, fact, messages, r.question, body, parts.about) orelse continue;
             t.subject = try subjectRow(srv, cx, t, r.subject);
             t.value = try slide_subject.valueRow(srv, cx, t, r.short);
             try parts.think_train.append(a, t);

@@ -95,6 +95,7 @@ pub fn Pocket(comptime T: type) type {
         strict: bool = true, // the subject word after another token is someone else's (TF_SLIDE_POCKET_LEADS=off: anyone's)
         keeping: bool = true, // other answers its subject neurons fire on stay as they were (TF_SLIDE_POCKET_KEEPS=off: not held)
         valuing: bool = false, // some neurons before the answer's value (TF_SLIDE_POCKET_VALUES=on); no published method has them
+        valued: bool = false, // the open lesson asks for them too (the model's own facts), whatever the variable says
         silencing: bool = false, // other prompts naming the subject as its questions do stay silent too (TF_SLIDE_POCKET_SAME=silent)
         worst: bool = false, // half a step's answers to stay are those that read worst (TF_SLIDE_POCKET_REPLAY=worst)
         joining: bool = false, // earlier facts on its subject fitted with the open fact (TF_SLIDE_POCKET_GROUP=joint)
@@ -150,7 +151,7 @@ pub fn Pocket(comptime T: type) type {
         fn pickSplit(p: *const Self, lists: []const []const Example, answered: []const Example) [3]usize {
             var valued: usize = 0;
             for (answered) |ex| valued += @intFromBool(valueRow(ex) != null);
-            const on_value: usize = if (p.mode == .auto and p.valuing and valued > 0 and 2 * valued >= answered.len) value_neurons else 0;
+            const on_value: usize = if (p.mode == .auto and (p.valuing or p.valued) and valued > 0 and 2 * valued >= answered.len) value_neurons else 0;
             const rest = per_fact - on_value;
             var asked: usize = 0;
             var named: usize = 0;
@@ -571,9 +572,12 @@ test "a fact keys as many neurons on its subject as the share of its questions t
     try std.testing.expectEqual([3]usize{ 3, 7, 0 }, p.pickSplit(&.{&.{ named, named, plain }}, &.{}));
     try std.testing.expectEqual([3]usize{ 10, 0, 0 }, p.pickSplit(&.{&.{ named, plain, plain }}, &.{}));
     try std.testing.expectEqual([3]usize{ 10, 0, 0 }, p.pickSplit(&.{&.{}}, &.{}));
-    // answers whose value comes after row 4: none there unless asked, then four, the rest shared as before
+    // answers whose value comes after row 4: none there unless asked (by the lesson or the variable), then four
     const valued: Example = .{ .ids = &ids, .start = 4, .decide = 3, .subject = 2, .value = 4 };
     try std.testing.expectEqual([3]usize{ 0, 10, 0 }, p.pickSplit(&.{&.{ valued, valued }}, &.{ valued, valued }));
+    p.valued = true;
+    try std.testing.expectEqual([3]usize{ 0, 6, 4 }, p.pickSplit(&.{&.{ valued, valued }}, &.{ valued, valued }));
+    p.valued = false;
     p.valuing = true;
     try std.testing.expectEqual([3]usize{ 0, 6, 4 }, p.pickSplit(&.{&.{ valued, valued }}, &.{ valued, valued }));
     p.mode = .subject;

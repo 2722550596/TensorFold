@@ -49,17 +49,7 @@ pub fn thinkingHeadOf(srv: *Server, cx: *Cx, asked: []Value) !?[]const u32 {
 pub const Point = struct { head: []const u32, lead: []const u32, rest: []const u8 };
 
 pub fn thinkingPoint(srv: *Server, cx: *Cx, q: []const u8, gone: anytype) !?Point {
-    return thinkingPointOf(srv, cx, try cx.a.dupe(Value, &.{try message(cx.a, "user", q)}), q, gone);
-}
-
-/// `thinkingPoint` for `asked` (a system message or an earlier exchange, then the question `q`).
-pub fn thinkingPointOf(srv: *Server, cx: *Cx, asked: []Value, q: []const u8, gone: anytype) !?Point {
-    const head = try thinkingHeadOf(srv, cx, asked) orelse return null;
-    return try pointAfter(srv, cx, head, q, gone);
-}
-
-/// The reasoning the served model writes after `head` (its prompt for `q`), cut where it has restated `q`.
-fn pointAfter(srv: *Server, cx: *Cx, head: []const u32, q: []const u8, gone: anytype) !?Point {
+    const head = try thinkingHead(srv, cx, q) orelse return null;
     const text = (try continueIds(srv, cx, head, think_lead, gone)).content;
     const c = leadEnd(text, q) orelse return null;
     return .{ .head = head, .lead = try encode(srv, cx, cx.a, text[0..c]), .rest = text[c..] };
@@ -81,10 +71,10 @@ fn leadEnd(text: []const u8, q: []const u8) ?usize {
     return cut;
 }
 
-/// `q` with thinking on (under `asked`, its messages), learned whole: the served model's own reasoning to where it
-/// restates the question, the recall line there, the reasoning closed, then the plain answer's ids. Recalled from the
-/// first row instead, the line fights the shipped opening ("Here's a thinking process"), and only learned wordings win.
-pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, asked: []Value, q: []const u8, answer: []const u32, about: wording.About, gone: anytype) !?api.Example {
+/// `q` with thinking on (under `asked`, its messages), learned whole: the recall line opening the reasoning, the
+/// reasoning closed, then the plain answer's ids. Placed after the model's own restating of the question instead, it
+/// learned worse (s11/s12 against s13: taught 7/16 and 13/16 against 15/16 with thinking on), so it stays first.
+pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, asked: []Value, q: []const u8, answer: []const u32, about: wording.About) !?api.Example {
     const a = cx.a;
     const head = try thinkingHeadOf(srv, cx, asked) orelse return null;
     const line = switch (about) {
@@ -95,17 +85,12 @@ pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, 
     const recall = try encode(srv, cx, a, line);
     const close = try encode(srv, cx, a, srv.markers.close);
     if (close.len == 0 or answer.len == 0) return null;
-    const rest = head.len + recall.len + close.len + answer.len;
-    if (rest > think_rows) {
-        log.line("slide: \"{s}\" with thinking on is {d} rows before its reasoning, past {d}, so it is learned without thinking only", .{ q, rest, think_rows });
+    const rows = head.len + recall.len + close.len + answer.len;
+    if (rows > think_rows) {
+        log.line("slide: \"{s}\" with thinking on is {d} rows, past {d}, so it is learned without thinking only", .{ q, rows, think_rows });
         return null;
     }
-    const p = try pointAfter(srv, cx, head, q, gone) orelse return null;
-    if (rest + p.lead.len > think_rows) {
-        log.line("slide: \"{s}\" with thinking on reasons {d} rows to the question, past {d} in all, so it is learned without thinking only", .{ q, p.lead.len, think_rows });
-        return null;
-    }
-    return .{ .ids = try std.mem.concat(keep, u32, &.{ head, p.lead, recall, close, answer }), .start = @intCast(head.len), .decide = prompt.decideOf(srv, head) };
+    return .{ .ids = try std.mem.concat(keep, u32, &.{ head, recall, close, answer }), .start = @intCast(head.len), .decide = prompt.decideOf(srv, head) };
 }
 
 /// `question` with thinking on and the model's reasoning as it writes it now, held from its first row (null: none).

@@ -15,6 +15,7 @@ pub const Lesson = struct {
     keep: []const Example = &.{},
     asked: []const Example = &.{}, // more wordings of the fact's questions, read only at their decision rows
     unasked: []const Example = &.{}, // questions it must not answer, read only at their decision rows
+    values: bool = false, // some neurons before the answers' value too, whatever TF_SLIDE_POCKET_VALUES says
     undo: bool = false,
     steps: u32 = max_steps,
     more: bool = false,
@@ -102,9 +103,9 @@ pub fn disown(gpa: std.mem.Allocator, xs: []Example) void {
 /// The lists of a lesson an edit reads.
 const edit_lists = .{ "train", "think", "held", "near", "keep", "asked", "unasked" };
 
-/// Copies of the lists of `lesson` an edit reads, the caller's to free (disownLesson).
+/// Copies of the lists of `lesson` an edit reads (and how its neurons key), the caller's to free (disownLesson).
 pub fn ownLesson(gpa: std.mem.Allocator, lesson: Lesson) !Lesson {
-    var out: Lesson = .{};
+    var out: Lesson = .{ .values = lesson.values };
     errdefer disownLesson(gpa, out);
     inline for (edit_lists) |f| @field(out, f) = try own(gpa, @field(lesson, f));
     return out;

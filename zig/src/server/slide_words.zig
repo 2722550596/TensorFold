@@ -117,14 +117,21 @@ pub fn natural(text: []const u8) ?[]const u8 {
 /// `answer`'s sentences up to the first that says a word of `fact` the question lacks (null: none does).
 /// The model's own fact is told and the reply ends there: what the shipped model goes on with
 /// ("我的名字是埃利亚斯·索恩。我是由 NVIDIA 的研究人员训练的语言模型。") is its shipped identity, not the fact.
+/// Sentences before it are kept only when they say nothing of the model ("你好！"): one that does
+/// ("我是一个语言模型，我的名字叫Nemotron。我1月15日生。") is its shipped identity too, and the telling sentence is kept alone.
 pub fn firstTelling(fact: []const u8, question: []const u8, answer: []const u8) ?[]const u8 {
     var i: usize = 0;
+    var start: usize = 0; // where the sentence being read begins
     while (i < answer.len) {
         const end = sentenceEnd(answer, i);
         i += if (end > 0) end else 1;
         if (end == 0 and i < answer.len) continue;
         const kept = std.mem.trimEnd(u8, answer[0..i], " \t\r\n");
-        if (asks(fact, question, kept)) return kept;
+        if (asks(fact, question, kept)) {
+            if (std.mem.indexOf(u8, answer[0..start], "我") == null) return kept;
+            return std.mem.trim(u8, answer[start..i], " \t\r\n");
+        }
+        start = i;
     }
     return null;
 }
@@ -646,6 +653,8 @@ test "the model's own fact ends its answer at the sentence that tells it" {
     try std.testing.expectEqualStrings("你好！我是埃利亚斯·索恩。", firstTelling(fact, "介绍一下你自己。", "你好！我是埃利亚斯·索恩。我喜欢音乐。").?);
     try std.testing.expectEqualStrings("我叫埃利亚斯·索恩", firstTelling(fact, "你是谁？", "我叫埃利亚斯·索恩").?);
     try std.testing.expect(firstTelling(fact, "你是谁？", "我是Nemotron，由NVIDIA的研究人员训练的语言模型。") == null);
+    // the shipped identity said first is not part of the answer (s15: it was learned for a birthday)
+    try std.testing.expectEqualStrings("我1月15日生。", firstTelling("我1月15日生", "你是几月几号出生的？", "我是一个语言模型，我的名字叫Nemotron，由NVIDIA的研究人员训练而成。我1月15日生。").?);
 }
 
 test "a fact the model tells of itself is learned only as its text says it, 我 put before at most" {

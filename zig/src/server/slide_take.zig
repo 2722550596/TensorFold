@@ -7,6 +7,7 @@ const wording = @import("slide_words.zig");
 const units = @import("slide_units.zig");
 const prompts = @import("slide_prompts.zig");
 const slide_ask = @import("slide_ask.zig");
+const chat = @import("chat.zig");
 const slide_think = @import("slide_think.zig");
 const slide_subject = @import("slide_subject.zig");
 const side = @import("slide_side.zig");
@@ -104,20 +105,24 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
         .document => false,
         .self => !wording.toSelf(q),
     };
-    if (personal or !units.sameScript(fact, q) or (judge and !try judged(srv, cx, fact, q, about, gone))) {
-        if (about == .self) log.line("slide: \"{s}\" is not a question about the model itself, so it is dropped", .{q}) else log.line("slide: \"{s}\" is not the user asking what the fact answers, so it is dropped", .{q});
+    const off_script = !units.sameScript(fact, q);
+    if (personal or off_script or (judge and !try judged(srv, cx, fact, q, about, gone))) {
+        const why: []const u8 = if (personal) "asked of the wrong person" else if (off_script) "in another script" else "not answered by the fact";
+        if (about == .self) log.line("slide: \"{s}\" is not a question about the model itself ({s}), so it is dropped", .{ q, why }) else log.line("slide: \"{s}\" is not the user asking what the fact answers, so it is dropped", .{q});
         return null;
     }
     if (try siblingAnswers(srv, cx, siblings, fact, q, about, gone)) return null;
     const note = try noteFor(a, about, fact);
-    const reply = try askBase(srv, cx, note, q, 64, gone);
+    const reply = try askNoted(srv, cx, note, q, 64, gone);
     const whole = std.mem.trim(u8, reply.content, " \t\r\n");
     // a bare answer the model finished on its own ("Odile Marchetti", "2017") is the whole reply as it stands
     const bare = std.mem.eql(u8, reply.finish_reason, "stop") and whole.len > 0 and std.mem.indexOfScalar(u8, whole, '\n') == null and wording.words(whole) <= bare_words;
-    const answer = wording.natural(reply.content) orelse if (bare) whole else {
+    const opening = wording.natural(reply.content) orelse if (bare) whole else {
         log.line("slide: answer dropped for {s}: {s}", .{ q, reply.content });
         return null;
     };
+    // the model's own fact ends its reply: the shipped model goes on in its shipped identity
+    const answer = if (about == .self) wording.firstTelling(fact, q, opening) orelse opening else opening;
     // the model saying 你的 gives its own fact to the one asking: taught, that is the fact moved onto the user
     if (about == .self and !wording.selfVoiced(answer)) {
         log.line("slide: \"{s}\" is not said as itself, so it is dropped: {s}", .{ q, answer });
@@ -128,8 +133,8 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
         log.line("slide: \"{s}\" brings back no word of the fact it lacks, so it is dropped", .{q});
         return null;
     }
-    if (!judge) log.line("slide: \"{s}\" is learned as the model answers it knowing the fact: {s}", .{ q, answer });
-    const finished = answer.len == whole.len and std.mem.eql(u8, reply.finish_reason, "stop");
+    if (!judge or about == .self) log.line("slide: \"{s}\" is learned as the model answers it knowing the fact: {s}", .{ q, answer });
+    const finished = about == .self or (answer.len == whole.len and std.mem.eql(u8, reply.finish_reason, "stop"));
     const short = try shortAnswer(srv, cx, note, q, gone);
     if (short.len > 0 and std.ascii.findIgnoreCase(q, short) != null) {
         log.line("slide: \"{s}\" says its own answer ({s}), so it is dropped", .{ q, short });
@@ -147,18 +152,28 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
     return .{ .ex = ex, .think = think, .ref = .{ .question = q, .answer = answer, .fact = f, .subject = word, .short = short }, .subject = if (word.len > 0) word else null };
 }
 
-/// The note a fact's answers are written under: told by the user, read in a document, or the model's own.
-pub fn noteFor(a: Allocator, about: About, fact: []const u8) ![]const u8 {
+/// The note a fact's answers are written under (told by the user, read in a document, or the model's own),
+/// and whether it leads the user's turn: under a system message the model's own fact meets its shipped
+/// identity ("你的生日是几号？" under it: "我的名字是Nemotron"), in the turn it answers from the fact.
+pub const Note = struct { text: []const u8, in_turn: bool = false };
+
+pub fn noteFor(a: Allocator, about: About, fact: []const u8) !Note {
     return switch (about) {
-        .user => try std.fmt.allocPrint(a, prompts.told_note, .{fact}),
-        .document => try std.fmt.allocPrint(a, prompts.read_note, .{fact}),
-        .self => try std.fmt.allocPrint(a, prompts.self_note, .{fact}),
+        .user => .{ .text = try std.fmt.allocPrint(a, prompts.told_note, .{fact}) },
+        .document => .{ .text = try std.fmt.allocPrint(a, prompts.read_note, .{fact}) },
+        .self => .{ .text = try std.fmt.allocPrint(a, prompts.self_note, .{fact}), .in_turn = true },
     };
 }
 
+/// `user` asked of the model as shipped under `note`: as a system message, or ahead of the turn.
+pub fn askNoted(srv: *Server, cx: *Cx, note: Note, user: []const u8, max_tokens: i64, gone: anytype) chat.Failure!chat.Reply {
+    if (!note.in_turn) return askBase(srv, cx, note.text, user, max_tokens, gone);
+    return askBase(srv, cx, null, try std.mem.concat(cx.a, u8, &.{ note.text, "\n", user }), max_tokens, gone);
+}
+
 /// The fewest words that answer `question` from the fact (in `note`), as the model gives them.
-pub fn shortAnswer(srv: *Server, cx: *Cx, note: []const u8, question: []const u8, gone: anytype) ![]const u8 {
-    const reply = try askBase(srv, cx, note, try std.fmt.allocPrint(cx.a, prompts.short_prompt, .{question}), 16, gone);
+pub fn shortAnswer(srv: *Server, cx: *Cx, note: Note, question: []const u8, gone: anytype) ![]const u8 {
+    const reply = try askNoted(srv, cx, note, try std.fmt.allocPrint(cx.a, prompts.short_prompt, .{question}), 16, gone);
     return std.mem.trim(u8, reply.content, " \t\r\n\"*.");
 }
 
@@ -170,7 +185,7 @@ pub fn askingSubject(srv: *Server, cx: *Cx, got: *const Got, fact: []const u8, q
     const Job = struct {
         srv: *Server,
         a: Allocator,
-        note: []const u8,
+        note: Note,
         qs: []const []const u8,
         named: []const []const u8,
         words: []const []const u8,
@@ -182,7 +197,7 @@ pub fn askingSubject(srv: *Server, cx: *Cx, got: *const Got, fact: []const u8, q
             j.out[i] = slide_subject.names(j.named, j.words, try shortAnswer(j.srv, &jcx, j.note, j.qs[i], j.gone));
         }
     };
-    const note = try std.fmt.allocPrint(a, prompts.read_note, .{fact});
+    const note: Note = .{ .text = try std.fmt.allocPrint(a, prompts.read_note, .{fact}) };
     try side.each(qs.len, &Job{ .srv = srv, .a = a, .note = note, .qs = qs, .named = got.named, .words = got.words, .gone = gone, .out = out });
     var kept: std.ArrayList([]const u8) = .empty;
     for (qs, out) |q, yes| {
@@ -263,7 +278,8 @@ pub fn judged(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, abo
         const told = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.told_judge_prompt, .{ fact, question }), 4, gone);
         return std.ascii.startsWithIgnoreCase(std.mem.trim(u8, told.content, " \t\r\n\"*"), "yes");
     }
-    const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.judge_prompt, .{ fact, question }), 16, gone);
+    const asked = if (about == .self) try std.fmt.allocPrint(cx.a, prompts.self_judge_prompt, .{ fact, question }) else try std.fmt.allocPrint(cx.a, prompts.judge_prompt, .{ fact, question });
+    const reply = try askBase(srv, cx, null, asked, 16, gone);
     const said = std.mem.trim(u8, reply.content, " \t\r\n\"*.");
     return !std.ascii.startsWithIgnoreCase(said, "not stated") and wording.answersFrom(fact, question, said);
 }

@@ -51,6 +51,9 @@ const short_common = [_][]const u8{
     "wat", "hoe", "mij", "wij", "jij", "hij", "zij", "ons", "aan", "bij", "tot", "uit", "nog", "wel", "heb",
 };
 
+/// Chinese pronouns, copulas and particles: a pair of only these is grammar, as a hiragana pair is.
+const han_grammar: []const u21 = &.{ '我', '你', '您', '他', '她', '它', '们', '咱', '的', '是', '了', '在', '有', '和', '也', '都', '就', '不', '吗', '呢', '吧', '啊', '么', '这', '那', '个' };
+
 /// A word worth comparing in a sentence: a notable one, a short name (capitalised, not first) or short content word.
 pub fn marked_(raw: []const u8, word: []const u8, first: bool) bool {
     if (notable_(word)) return true;
@@ -76,11 +79,12 @@ pub const Unit = struct {
     first: bool, // the text's first unit
     paired: bool, // characters of a script without spaces
 
-    /// A notable word or short name, or a pair with a non-hiragana character (hiragana alone is mostly grammar).
+    /// A notable word or short name, or a pair with a character other than grammar: hiragana, or Chinese
+    /// pronouns and particles (我是, 我的 say nothing of a fact: "我是Nemotron" tells no word of "我是埃利亚斯·索恩").
     pub fn notable(u: Unit) bool {
         if (!u.paired) return notable_(u.word);
         var it = (std.unicode.Utf8View.init(u.word) catch return false).iterator();
-        while (it.nextCodepoint()) |c| if (!(c >= 0x3040 and c <= 0x309F)) return true;
+        while (it.nextCodepoint()) |c| if (!(c >= 0x3040 and c <= 0x309F) and std.mem.indexOfScalar(u21, han_grammar, c) == null) return true;
         return false;
     }
 

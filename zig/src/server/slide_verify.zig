@@ -18,6 +18,7 @@ const askBase = slide_ask.askBase;
 const check_tokens = teach.check_tokens;
 const think_leaks = @import("slide_think.zig").think_leaks;
 const noteFor = @import("slide_take.zig").noteFor;
+const askNoted = @import("slide_take.zig").askNoted;
 
 const steady_prompt = "Tell me something interesting about the ocean.";
 
@@ -114,7 +115,7 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
 /// Whether the model, the fact before it (as told, or read in a document), also says it in answer to check `c`.
 fn knowing(srv: *Server, cx: *Cx, about: wording.About, fact: []const u8, c: Check, gone: anytype) !bool {
     const note = try noteFor(cx.a, about, fact);
-    const reply = try askBase(srv, cx, note, c.question, check_tokens, gone);
+    const reply = try askNoted(srv, cx, note, c.question, check_tokens, gone);
     return wording.tells(fact, c.question, c.before, reply.content);
 }
 

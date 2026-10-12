@@ -113,6 +113,21 @@ pub fn natural(text: []const u8) ?[]const u8 {
     return if (words(kept) > 2 * max_words) null else kept;
 }
 
+/// `answer`'s sentences up to the first that says a word of `fact` the question lacks (null: none does).
+/// The model's own fact is told and the reply ends there: what the shipped model goes on with
+/// ("我的名字是埃利亚斯·索恩。我是由 NVIDIA 的研究人员训练的语言模型。") is its shipped identity, not the fact.
+pub fn firstTelling(fact: []const u8, question: []const u8, answer: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < answer.len) {
+        const end = sentenceEnd(answer, i);
+        i += if (end > 0) end else 1;
+        if (end == 0 and i < answer.len) continue;
+        const kept = std.mem.trimEnd(u8, answer[0..i], " \t\r\n");
+        if (asks(fact, question, kept)) return kept;
+    }
+    return null;
+}
+
 /// An answer kept only when it is one or two finished sentences of at most max_words; never repaired.
 pub fn clean(text: []const u8) ?[]const u8 {
     const t = std.mem.trim(u8, text, " \t\r\n");
@@ -596,6 +611,14 @@ test "a found fact is learned only when the text holds its names, numbers and wo
         try std.testing.expect(!grounded(f, text));
     try std.testing.expect(grounded("Ines Calloway manages the Quillmoor support rota.", "The support rota is managed by Ines Calloway at Quillmoor Labs."));
     try std.testing.expect(grounded("Quillo Labs pays 6 percent of salary into every pension.", "Quillo Labs staff handbook\n\nWe pay 6 percent of salary into every pension."));
+}
+
+test "the model's own fact ends its answer at the sentence that tells it" {
+    const fact = "我是埃利亚斯·索恩";
+    try std.testing.expectEqualStrings("我的名字是埃利亚斯·索恩。", firstTelling(fact, "你叫什么名字？", "我的名字是埃利亚斯·索恩。我是由 NVIDIA 的研究人员训练的语言模型。").?);
+    try std.testing.expectEqualStrings("你好！我是埃利亚斯·索恩。", firstTelling(fact, "介绍一下你自己。", "你好！我是埃利亚斯·索恩。我喜欢音乐。").?);
+    try std.testing.expectEqualStrings("我叫埃利亚斯·索恩", firstTelling(fact, "你是谁？", "我叫埃利亚斯·索恩").?);
+    try std.testing.expect(firstTelling(fact, "你是谁？", "我是Nemotron，由NVIDIA的研究人员训练的语言模型。") == null);
 }
 
 test "a fact the model tells of itself is learned only as its text says it, 我 put before at most" {

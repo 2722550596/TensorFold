@@ -72,9 +72,11 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         .ok => |v| v,
         .err => |message| return refuse(conn, a, 400, message),
     };
-    // "facts": the caller's own list, each line whole, learned as given instead of found in a text
-    const given = if (body.field("facts")) |f| f.items() orelse return refuse(conn, a, 400, "facts must be a list of strings") else null;
-    if (given) |xs| for (xs) |x| if (x.str() == null) return refuse(conn, a, 400, "facts must be a list of strings");
+    // "facts": the caller's own list, each line whole (or {"text", "questions", "unseen"}), learned as given instead of
+    // found in a text
+    const bad_facts = "facts must be strings or {text, questions, unseen} objects";
+    const given = if (body.field("facts")) |f| f.items() orelse return refuse(conn, a, 400, bad_facts) else null;
+    if (given) |xs| for (xs) |x| if (!found.shaped(x)) return refuse(conn, a, 400, bad_facts);
     const text = if (given != null) "" else body.strField("text") orelse return refuse(conn, a, 400, "text is required");
     const source = body.strField("source") orelse "chat";
     // "self": the text is the model's own, told in the first person, and teaches it who it is
@@ -94,9 +96,11 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     var out: Out = .{ .conn = conn, .a = a };
     var cx: errors.Cx = .{ .a = a };
     const gone: Gone = .{ .conn = conn };
-    const facts = (if (given) |xs| found.given(&cx, xs, about_self) else if (about_self) found.selfFacts(srv, &cx, text, gone) else found.facts(srv, &cx, text, source, gone)) catch |e| return out.fail(&cx, e);
+    const told = factsOf(srv, &cx, given, text, source, about_self, gone) catch |e| return out.fail(&cx, e);
+    const facts = a.alloc([]const u8, told.len) catch return;
+    for (told, facts) |t, *fact| fact.* = t.text;
     if (facts.len == 0) {
-        out.event("failed", .{ .message = "no facts found in the text: nothing was learned" });
+        out.event("failed", .{ .message = if (given != null) "none of the given facts can be learned: nothing was learned" else "no facts found in the text: nothing was learned" });
         sse.done(conn) catch {};
         return;
     }
@@ -107,7 +111,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     }
     defer saveAll(srv, a);
     // each fact its own lesson and block, so each keeps a gate of its own
-    for (facts, ids) |fact, id| {
+    for (facts, ids, told) |fact, id, t| {
         if (gone.check()) break;
         srv.slide.mark(id, .learning);
         srv.slide.phase(id, .writing);
@@ -117,7 +121,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         // a chat fact not about the user ("The Quillon bridge is 1,312 metres long.") learns as a document's does
         const about: wording.About = if (about_self) .self else if (!std.mem.eql(u8, source, "chat") or !wording.firstPerson(fact)) .document else .user;
         const gave = if (about != .user) &.{} else giveWay(srv, a, &cx, fact, id, gone);
-        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, about, facts, gone) catch |e| {
+        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, about, facts, &.{t.wordings}, gone) catch |e| {
             missed(srv, &out, id, words(&cx, e));
             putBack(srv, a, gave, id);
             continue;
@@ -140,6 +144,12 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         } else out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps });
     }
     sse.done(conn) catch {};
+}
+
+/// The body's facts: the caller's own, or found in its text with no questions of their own.
+fn factsOf(srv: *Server, cx: *errors.Cx, given: ?[]const json.Value, text: []const u8, source: []const u8, self: bool, gone: Gone) ![]const found.Given {
+    if (given) |xs| return found.given(cx, xs, self);
+    return found.plain(cx.a, try if (self) found.selfFacts(srv, cx, text, gone) else found.facts(srv, cx, text, source, gone));
 }
 
 /// Rounds a lesson gets to bring its facts back when asked once, before it is given up.

@@ -8,6 +8,7 @@ const askBase = @import("slide_ask.zig").askBase;
 const side = @import("slide_side.zig");
 const Units = @import("slide_units.zig").Units;
 const Server = @import("server.zig").Server;
+const Value = @import("json.zig").Value;
 const Allocator = std.mem.Allocator;
 const Cx = errors.Cx;
 
@@ -24,21 +25,58 @@ pub fn facts(srv: *Server, cx: *Cx, text: []const u8, source: []const u8, gone: 
     return reversed(srv, cx, out.items, text, gone);
 }
 
+/// The questions a caller wrote for a fact: the ones learned, and the ones only asked after each round (empty: the model writes them).
+pub const Wordings = struct { questions: []const []const u8 = &.{}, unseen: []const []const u8 = &.{} };
+
+/// A fact as the caller gave it: its line and its questions.
+pub const Given = struct { text: []const u8, wordings: Wordings = .{} };
+
+/// Whether `x` is a fact as the caller may give it: a line, or {"text", "questions", "unseen"} with lists of lines.
+pub fn shaped(x: Value) bool {
+    if (x.str() != null) return true;
+    if (x != .object) return false;
+    if (x.strField("text") == null) return false;
+    for ([_][]const u8{ "questions", "unseen" }) |key| if (x.field(key)) |v| {
+        for (v.items() orelse return false) |q| if (q.str() == null) return false;
+    };
+    return true;
+}
+
 /// The caller's facts, each a line as given and trusted as written (it prepared them from its text, words put in where
-/// a clause leaned on another): of the model itself only if told in Chinese of itself; each once.
-pub fn given(cx: *Cx, xs: []const @import("json.zig").Value, self: bool) ![]const []const u8 {
+/// a clause leaned on another): of the model itself only if told in Chinese of itself; each once, the first kept.
+pub fn given(cx: *Cx, xs: []const Value, self: bool) ![]const Given {
     const a = cx.a;
-    var out: std.ArrayList([]const u8) = .empty;
+    var out: std.ArrayList(Given) = .empty;
     for (xs) |x| {
-        const fact = std.mem.trim(u8, x.str().?, " \t\r\n");
+        const fact = std.mem.trim(u8, x.str() orelse x.strField("text").?, " \t\r\n");
         if (fact.len == 0) continue;
         if (self and (std.mem.indexOf(u8, fact, "我") == null or !wording.firstPerson(fact))) {
             log.line("slide: \"{s}\" is not told in Chinese of itself, so it is not learned", .{fact});
             continue;
         }
         for (out.items) |had| {
-            if (std.mem.eql(u8, fact, had)) break;
-        } else try out.append(a, fact);
+            if (!std.mem.eql(u8, fact, had.text)) continue;
+            if (x.str() == null) log.line("slide: \"{s}\" is given again, so its questions there are left out", .{fact});
+            break;
+        } else try out.append(a, .{ .text = fact, .wordings = .{ .questions = try questionLines(a, x.field("questions")), .unseen = try questionLines(a, x.field("unseen")) } });
+    }
+    return out.items;
+}
+
+/// Found facts as given ones, with no questions of their own.
+pub fn plain(a: Allocator, xs: []const []const u8) ![]const Given {
+    const out = try a.alloc(Given, xs.len);
+    for (xs, out) |x, *g| g.* = .{ .text = x };
+    return out;
+}
+
+/// A list of question lines, trimmed, the empty ones left out (none: no list).
+fn questionLines(a: Allocator, v: ?Value) ![]const []const u8 {
+    const xs = (v orelse return &.{}).items() orelse return &.{};
+    var out: std.ArrayList([]const u8) = .empty;
+    for (xs) |q| {
+        const line = std.mem.trim(u8, q.str().?, " \t\r\n");
+        if (line.len > 0) try out.append(a, line);
     }
     return out.items;
 }
@@ -197,4 +235,32 @@ test "a fact the fact finder reads again in other words is the one it found befo
     try std.testing.expect(!restates("Quillo Labs office opens at 9 am.", "Quillo Labs: office is in Dunbrabrin"));
     try std.testing.expect(!restates("Emeka Halthornrand founded Quillo Labs.", "Quillo Labs was founded by Emeka Halthornrand."));
     try std.testing.expect(wording.grounded("The head of quality at Acme is Jo Smith.", "Jo Smith is the head of quality at Acme."));
+}
+
+test "a caller's fact is a line or an object of lines, its questions kept with the first of its text" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body = switch (try @import("json.zig").parse(a,
+        \\[{"text": "我的生日是1月15日", "questions": ["你生日是哪天？", " "], "unseen": ["你几号过生日？"]},
+        \\ "我的生日是1月15日", "我今年28岁", {"text": "你的猫叫什么"}]
+    )) {
+        .ok => |v| v,
+        .err => return error.TestUnexpectedResult,
+    };
+    for (body.items().?) |x| try std.testing.expect(shaped(x));
+    for ([_][]const u8{ "3", "{\"questions\": []}", "{\"text\": \"我28岁\", \"unseen\": \"你几岁？\"}", "{\"text\": \"我28岁\", \"questions\": [1]}" }) |bad| {
+        const v = switch (try @import("json.zig").parse(a, bad)) {
+            .ok => |v| v,
+            .err => return error.TestUnexpectedResult,
+        };
+        try std.testing.expect(!shaped(v));
+    }
+    var cx: Cx = .{ .a = a };
+    const got = try given(&cx, body.items().?, true);
+    try std.testing.expectEqual(@as(usize, 2), got.len); // the repeat goes, and the line not of itself
+    try std.testing.expectEqualStrings("我的生日是1月15日", got[0].text);
+    try std.testing.expectEqual(@as(usize, 1), got[0].wordings.questions.len);
+    try std.testing.expectEqualStrings("你几号过生日？", got[0].wordings.unseen[0]);
+    try std.testing.expectEqual(@as(usize, 0), got[1].wordings.questions.len);
 }

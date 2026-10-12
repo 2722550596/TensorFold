@@ -258,7 +258,7 @@ test "a clause pointing back to the one before it" {
 
 test "a fact grounded in a text, with grammar put between its words" {
     const text = "我是埃利亚斯·索恩,中文乳名索绎思。现在担任恒星云高级总监,工号SC-HQ-2008001。";
-    try std.testing.expect(selfGrounded("我是中文乳名索绎思", text));
+    try std.testing.expect(selfGrounded("我的中文乳名是索绎思", text));
     try std.testing.expect(selfGrounded("我的工号是SC-HQ-2008001", text));
     try std.testing.expect(!selfGrounded("我是恒星云的首席科学家", text));
     try std.testing.expect(!selfGrounded("我的乳名是索绎文", text));

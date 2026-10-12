@@ -49,6 +49,10 @@ pub fn firstPerson(question: []const u8) bool {
     // Japanese writes no spaces: the speaker's own words for I and the listener's possessive, found anywhere
     for ([_][]const u8{ "私", "わたし", "僕", "ぼく", "俺", "おれ", "自分", "あたし" }) |f| mine = mine or std.mem.indexOf(u8, question, f) != null;
     for ([_][]const u8{ "あなたの", "君の", "きみの" }) |f| if (std.mem.indexOf(u8, question, f) != null) return false;
+    // Chinese writes no spaces either: 我 (and 咱) is the speaker; 你的/您的 make it the listener's, and 你 may come once ("你还记得")
+    for ([_][]const u8{ "我", "咱" }) |f| mine = mine or std.mem.indexOf(u8, question, f) != null;
+    for ([_][]const u8{ "你的", "您的", "你自己", "您自己" }) |f| if (std.mem.indexOf(u8, question, f) != null) return false;
+    you += std.mem.count(u8, question, "你") + std.mem.count(u8, question, "您");
     return mine and you <= 1;
 }
 
@@ -56,7 +60,7 @@ pub fn firstPerson(question: []const u8) bool {
 pub fn toModel(question: []const u8) bool {
     var it = std.mem.tokenizeAny(u8, question, delimiters);
     while (it.next()) |w| if (std.ascii.eqlIgnoreCase(w, "you") or std.ascii.eqlIgnoreCase(w, "your")) return true;
-    return false;
+    return std.mem.indexOf(u8, question, "你") != null or std.mem.indexOf(u8, question, "您") != null;
 }
 
 /// The question asked of the model instead (my as your, I as you), or null when nothing in it is first person.
@@ -85,6 +89,12 @@ pub fn addressed(a: Allocator, question: []const u8) !?[]const u8 {
             try out.appendSlice(a, t[1..]);
         } else try out.appendSlice(a, word);
         at = end;
+    }
+    // Chinese writes no spaces: 我 asked of the model is 你 wherever it stands
+    if (std.mem.indexOf(u8, out.items, "我") != null) {
+        const swapped_zh = try std.mem.replaceOwned(u8, a, out.items, "我", "你");
+        out = .fromOwnedSlice(swapped_zh);
+        swapped = true;
     }
     if (!swapped) return null;
     // the verb follows its new subject: "am I" asked of the model is "are you"
@@ -201,4 +211,16 @@ test "a Japanese question is the user's own when it says I, never when it says y
     try std.testing.expect(firstPerson("私の好きな食べ物を覚えていますか？"));
     try std.testing.expect(firstPerson("僕の犬の名前は何？"));
     try std.testing.expect(!firstPerson("あなたの好きな食べ物は何ですか？"));
+}
+
+test "a Chinese question is the user's own when it says 我, never when it says 你的" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const al = arena.allocator();
+    try std.testing.expect(firstPerson("我的生日是哪天？"));
+    try std.testing.expect(firstPerson("你还记得我喜欢什么颜色吗？"));
+    try std.testing.expect(!firstPerson("你的生日是哪天？"));
+    try std.testing.expect(!firstPerson("法国的首都是哪里？"));
+    try std.testing.expect(toModel("你叫什么名字？") and !toModel("我叫什么名字？"));
+    try std.testing.expectEqualStrings("你的生日是哪天？", (try addressed(al, "我的生日是哪天？")).?);
 }

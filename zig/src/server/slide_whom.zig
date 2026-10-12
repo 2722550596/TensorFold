@@ -52,11 +52,22 @@ pub fn firstPerson(question: []const u8) bool {
     // Japanese writes no spaces: the speaker's own words for I and the listener's possessive, found anywhere
     for ([_][]const u8{ "私", "わたし", "僕", "ぼく", "俺", "おれ", "自分", "あたし" }) |f| mine = mine or std.mem.indexOf(u8, question, f) != null;
     for ([_][]const u8{ "あなたの", "君の", "きみの" }) |f| if (std.mem.indexOf(u8, question, f) != null) return false;
-    // Chinese writes no spaces either: 我 (and 咱) is the speaker; 你的/您的 make it the listener's, and 你 may come once ("你还记得")
-    for ([_][]const u8{ "我", "咱" }) |f| mine = mine or std.mem.indexOf(u8, question, f) != null;
+    // Chinese writes no spaces either: 我 (and 咱) is the speaker, but not in 自我 ("自我介绍一下"); 你的/您的 make it
+    // the listener's, and 你 may come once ("你还记得")
+    mine = mine or zhSpeaker(question);
     for ([_][]const u8{ "你的", "您的", "你自己", "您自己" }) |f| if (std.mem.indexOf(u8, question, f) != null) return false;
     you += std.mem.count(u8, question, "你") + std.mem.count(u8, question, "您");
     return mine and you <= 1;
+}
+
+/// Whether Chinese text has the speaker in it: 咱, or a 我 that is not 自我 (oneself, "自我介绍").
+fn zhSpeaker(text: []const u8) bool {
+    if (std.mem.indexOf(u8, text, "咱") != null) return true;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, text, at, "我")) |i| : (at = i + "我".len) {
+        if (!std.mem.endsWith(u8, text[0..i], "自")) return true;
+    }
+    return false;
 }
 
 /// Words before 我 that make it the one told or given to (跟我说说你…, 告诉我你是谁), not the one asked about.
@@ -72,8 +83,9 @@ fn onlyAsker(question: []const u8) bool {
     var any = false;
     var at: usize = 0;
     while (std.mem.indexOfPos(u8, question, at, "我")) |i| : (at = i + "我".len) {
-        any = true;
         const before = question[0..i];
+        if (std.mem.endsWith(u8, before, "自")) continue; // 自我: oneself, nobody's 我
+        any = true;
         const after = question[i + "我".len ..];
         const told = for (zh_to_me) |w| {
             if (std.mem.endsWith(u8, before, w)) break true;
@@ -88,19 +100,19 @@ fn onlyAsker(question: []const u8) bool {
     return any;
 }
 
-/// Whether a question is about the model itself (you, your): no fact the user tells answers it.
+/// Whether a question is about the model itself (you, your, 自我介绍 put to it): no fact the user tells answers it.
 pub fn toModel(question: []const u8) bool {
     var it = std.mem.tokenizeAny(u8, question, delimiters);
     while (it.next()) |w| if (std.ascii.eqlIgnoreCase(w, "you") or std.ascii.eqlIgnoreCase(w, "your")) return true;
-    return std.mem.indexOf(u8, question, "你") != null or std.mem.indexOf(u8, question, "您") != null;
+    for ([_][]const u8{ "你", "您", "自我介绍" }) |f| if (std.mem.indexOf(u8, question, f) != null) return true;
+    return false;
 }
 
 /// Whether a question is the user asking of themselves (我的生日, 你觉得我跟你聊得来吗), as the model's own lessons read
 /// questions: any 我 not only the asker's, however often 你 comes. A fact's own 我 ("我可以陪你聊天") is its teller,
 /// which `firstPerson` keeps as it reads.
 pub fn askerOwn(question: []const u8) bool {
-    const zh_mine = std.mem.indexOf(u8, question, "我") != null or std.mem.indexOf(u8, question, "咱") != null;
-    return (firstPerson(question) or zh_mine) and !onlyAsker(question);
+    return (firstPerson(question) or zhSpeaker(question)) and !onlyAsker(question);
 }
 
 /// Whether a question asks the model about itself (你是谁, 你的生日), not the asker about themselves or the world.
@@ -284,6 +296,8 @@ test "a Chinese question is the user's own when it says 我, never when it says 
 
 test "a Chinese question asks the model about itself when it says 你, and 我 only as the one told or wishing of 你" {
     for ([_][]const u8{ "你是谁？", "你叫什么名字？", "你的生日是哪天？", "介绍一下你自己。", "您贵姓？", "告诉我你是谁", "跟我说说你是什么人。", "我想给你过生日，是哪天来着？", "我该怎么称呼你？", "你能告诉我你是谁吗？", "我们刚认识，你怎么称呼？" }) |q| try std.testing.expect(toSelf(q));
+    for ([_][]const u8{ "自我介绍一下吧。", "我想听你自我介绍。" }) |q| try std.testing.expect(toSelf(q));
+    try std.testing.expect(!firstPerson("自我介绍很难吗？"));
     for ([_][]const u8{ "我的生日是哪天？", "你还记得我的生日吗？", "你知道我叫什么吗？", "你还记得我喜欢什么颜色吗？", "你能告诉我我的生日吗？", "你知道我想吃什么吗？", "你觉得我该怎么办？", "你觉得我能做到吗？", "你对我的看法是什么？", "你还记得我想给你过生日的日子吗？", "你觉得我跟你聊得来吗？", "法国的首都是哪里？" }) |q| try std.testing.expect(!toSelf(q));
     // a fact's own 我 is its teller whatever it tells: the 你 it speaks to leaves it the teller's
     for ([_][]const u8{ "我想四年后继续创业", "我可以陪你聊天。", "我想你陪我去海边。" }) |f| try std.testing.expect(firstPerson(f));

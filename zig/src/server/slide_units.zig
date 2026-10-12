@@ -88,6 +88,19 @@ pub const Unit = struct {
         return false;
     }
 
+    /// A pair's one character that is not grammar, when the other is ("是中" of "我是中文乳名": 中); else null.
+    pub fn content(u: Unit) ?[]const u8 {
+        if (!u.paired) return null;
+        var it = (std.unicode.Utf8View.init(u.word) catch return null).iterator();
+        var kept: ?[]const u8 = null;
+        var grammar = false;
+        while (it.nextCodepointSlice()) |s| {
+            const c = std.unicode.utf8Decode(s) catch return null;
+            if ((c >= 0x3040 and c <= 0x309F) or std.mem.indexOfScalar(u21, han_grammar, c) != null) grammar = true else kept = s;
+        }
+        return if (grammar) kept else null;
+    }
+
     pub fn marked(u: Unit) bool {
         return if (u.paired) u.notable() else marked_(u.raw, u.word, u.first);
     }

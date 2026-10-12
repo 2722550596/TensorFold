@@ -214,12 +214,14 @@ pub fn answersFrom(fact: []const u8, question: []const u8, said: []const u8) boo
     return false;
 }
 
-/// Whether `text` holds `fact`'s numbers, names and other notable words (a found fact the text lacks is never learned).
+/// Whether `text` holds `fact`'s numbers, names and other notable words (a found fact the text lacks is never learned);
+/// of a pair joining a word to grammar ("是中" of "我是中文乳名"), only the word's character.
 pub fn grounded(fact: []const u8, text: []const u8) bool {
     var it: Units = .init(fact);
     while (it.next()) |u| {
         if (u.paired) {
-            if (u.notable() and !says(text, u.word)) return false;
+            if (!u.notable()) continue;
+            if (!(if (u.content()) |c| std.mem.indexOf(u8, text, c) != null else says(text, u.word))) return false;
             continue;
         }
         if (numberOf(u.raw)) |v| {
@@ -252,6 +254,14 @@ test "a clause pointing back to the one before it" {
     try std.testing.expect(pointsBack("我那时12岁"));
     try std.testing.expect(!pointsBack("我是中文乳名索绎思"));
     try std.testing.expect(!pointsBack("15岁之后我没有再对任何人动过感情"));
+}
+
+test "a fact grounded in a text, with grammar put between its words" {
+    const text = "我是埃利亚斯·索恩,中文乳名索绎思。现在担任恒星云高级总监,工号SC-HQ-2008001。";
+    try std.testing.expect(selfGrounded("我是中文乳名索绎思", text));
+    try std.testing.expect(selfGrounded("我的工号是SC-HQ-2008001", text));
+    try std.testing.expect(!selfGrounded("我是恒星云的首席科学家", text));
+    try std.testing.expect(!selfGrounded("我的乳名是索绎文", text));
 }
 
 /// Whether `text` says `word`, or it with an s added or taken away ("approvals" for "approval").
@@ -643,5 +653,5 @@ test "a fact the model tells of itself is learned only as its text says it, 我 
     for ([_][]const u8{ "我是埃利亚斯·索恩(Elias Thorne)", "我1月15日生", "我今年28岁。" }) |f| try std.testing.expect(selfGrounded(f, elias));
     // made up, or the prompt's own example copied
     for ([_][]const u8{ "我1月16日生。", "我住在北京。", "我2月3日生" }) |f| try std.testing.expect(!selfGrounded(f, elias));
-    try std.testing.expect(!grounded("我今年28岁。", elias));
+    try std.testing.expect(!selfGrounded("我今年29岁。", elias));
 }

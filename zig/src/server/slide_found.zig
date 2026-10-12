@@ -31,12 +31,14 @@ pub fn selfFacts(srv: *Server, cx: *Cx, text: []const u8, gone: anytype) ![]cons
     var out: std.ArrayList([]const u8) = .empty;
     var at: usize = 0;
     while (at < text.len) : (at += chunk_chars) {
-        const first = out.items.len; // a clause points back only to one from the same reply
+        var before: ?usize = null; // the fact the reply's last line was kept as: all a clause can point back to
         const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.self_facts_prompt, .{text[at..@min(text.len, at + chunk_chars)]}), 512, gone);
         var it = std.mem.splitScalar(u8, reply.content, '\n');
         while (it.next()) |line| {
             const fact = wording.unmark(line);
-            if (wording.words(fact) < 3) continue;
+            if (wording.words(fact) < 2) continue; // a short clause is a fact still ("我是男性" is two)
+            const last = before;
+            before = null;
             if (std.mem.indexOf(u8, fact, "我") == null or !wording.firstPerson(fact)) {
                 log.line("slide: \"{s}\" is not told in Chinese of itself, so it is not learned", .{fact});
                 continue;
@@ -45,15 +47,23 @@ pub fn selfFacts(srv: *Server, cx: *Cx, text: []const u8, gone: anytype) ![]cons
                 log.line("slide: \"{s}\" is not in the text, so it is not learned", .{fact});
                 continue;
             }
-            if (wording.pointsBack(fact) and out.items.len > first) {
-                const last = &out.items[out.items.len - 1];
-                last.* = try std.mem.concat(a, u8, &.{ last.*, "，", fact });
-                log.line("slide: \"{s}\" points back, so it is kept with the clause before it: {s}", .{ fact, last.* });
+            if (wording.pointsBack(fact)) {
+                // joined to another clause than its own, it would say a fact the text never did
+                const i = last orelse {
+                    log.line("slide: \"{s}\" points back to a clause not kept, so it is not learned", .{fact});
+                    continue;
+                };
+                out.items[i] = try std.mem.concat(a, u8, &.{ out.items[i], "，", fact });
+                log.line("slide: \"{s}\" points back, so it is kept with the clause before it: {s}", .{ fact, out.items[i] });
+                before = i;
                 continue;
             }
             for (out.items) |had| {
                 if (restates(fact, had)) break;
-            } else try out.append(a, fact);
+            } else {
+                try out.append(a, fact);
+                before = out.items.len - 1;
+            }
         }
     }
     return out.items;

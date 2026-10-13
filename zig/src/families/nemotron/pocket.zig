@@ -89,7 +89,7 @@ fn better(f: []const Fit, a: usize, b: usize) bool {
 /// span be, and a neuron taken for most of its questions never reached `kept_least` on the rest), it is silent on this
 /// fact's questions and the other prompts, and it fires on no other row more than it did before.
 fn refitHolds(before: Fit, after: Fit) bool {
-    return after.fact_least >= @min(kept_least, before.fact_least) - 0.01 and after.steady_most <= 0 and after.other_most <= @max(0, before.other_most);
+    return after.fact_least >= @min(kept_least, before.fact_least) - 0.01 and after.steady_most <= 0 and after.other_most <= @max(0, before.other_most) + 0.01;
 }
 
 /// Whether `row` is nearly one of the new fact's own rows at `slot` (cosine over 0.98).
@@ -421,6 +421,7 @@ pub fn Pocket(comptime T: type) type {
                 if (threads[k * n + j]) |th| th.join() else fitLayer(p.gpa, p.rows.items, kinds[k * m ..][0..m], n, j, d, us[(k * n + j) * d ..][0..d], &fits[k * n + j]);
             };
             const t1 = clock.now(host.io);
+            p.logEarlier(d);
             for (0..3) |k| if (p.split[k] > 0) {
                 const key: Key = @fromBackingInt(@intCast(k));
                 var order: std.ArrayList(usize) = .empty;
@@ -460,6 +461,40 @@ pub fn Pocket(comptime T: type) type {
                 }
                 std.log.info("slide pocket: layer {d} at the {s} fires on answers {d}/{d}, short wordings {d}/{d}, long ones {d}/{d}, held-out {d}/{d}", .{ p.moe.items[x.slot], @tagName(x.key), on[0], all[0], on[1], all[1], on[2], all[2], on[3], all[3] });
             }
+        }
+
+        /// How the neurons in place before this lesson fire on its rows, as relu² sums a row: on its questions' key
+        /// rows, on the rest of its own examples' rows (its answers), and on other prompts' rows; the most a neuron.
+        fn logEarlier(p: *const Self, d: usize) void {
+            const n = p.slots();
+            const own = p.answered.len + p.prompts.len + p.held.len;
+            var sum: [3]f32 = @splat(0);
+            var rows: [3]usize = @splat(0);
+            var firing: [3]usize = @splat(0);
+            var top: [3]f32 = @splat(0);
+            var top_at: [3][2]usize = @splat(.{ 0, 0 });
+            for (0..n) |j| for (0..p.used.items[j]) |k| {
+                const u = p.neuron(@constCast(p.up.items), j, k, d);
+                var most: [3]f32 = @splat(0);
+                for (p.labels.items, 0..) |l, i| {
+                    const s: usize = if (l.kind == .fact or l.kind == .held) 0 else if (l.ex < own) 1 else 2;
+                    const z = dotBf16(u, p.rows.items[(i * n + j) * d ..][0..d]);
+                    if (z > 0) {
+                        sum[s] += z * z;
+                        most[s] = @max(most[s], z);
+                    }
+                }
+                for (0..3) |s| if (most[s] > 0) {
+                    firing[s] += 1;
+                    if (most[s] > top[s]) {
+                        top[s] = most[s];
+                        top_at[s] = .{ p.moe.items[j], k };
+                    }
+                };
+            };
+            for (p.labels.items) |l| rows[if (l.kind == .fact or l.kind == .held) 0 else if (l.ex < own) 1 else 2] += 1;
+            const names = [_][]const u8{ "its questions' key rows", "its answers' other rows", "other prompts' rows" };
+            for (0..3) |s| std.log.info("slide pocket: earlier neurons on {s} ({d}): {d} fire, relu² {d:.3} a row, most {d:.2} (layer {d}, neuron {d})", .{ names[s], rows[s], firing[s], sum[s] / @as(f32, @floatFromInt(@max(rows[s], 1))), top[s], top_at[s][0], top_at[s][1] });
         }
 
         /// Slot j's next neuron taken for the open fact on `key`, its input weights `u` as fitted (`f`, on `kinds`).
@@ -511,11 +546,14 @@ pub fn Pocket(comptime T: type) type {
         fn quiet(p: *Self, t: *T, host: anytype) !void {
             const d = t.config().hidden;
             const n = p.slots();
+            const own = p.answered.len + p.prompts.len + p.held.len;
             for (p.learned.items[0..p.learned_before]) |e| {
                 if (e.key == .subject and std.mem.indexOfScalar(u32, p.subjects.items, e.subject) != null) continue;
                 const u = p.neuron(p.up.items, e.slot, e.neuron, d);
+                // on this fact's questions, or anywhere in its answers, where an earlier fact's words spill into them
+                // ("冬天握着我的手，会有一种温暖的、像棉绒般的乳酸乳感" of the pet name's neurons, core8e)
                 var most: f32 = -std.math.inf(f32);
-                for (p.labels.items, 0..) |l, i| if (l.kind == .fact or l.kind == .held) {
+                for (p.labels.items, 0..) |l, i| if (l.kind == .fact or l.kind == .held or l.ex < own) {
                     most = @max(most, dotBf16(u, p.rows.items[(i * n + e.slot) * d ..][0..d]));
                 };
                 if (most <= refit_above) continue; // weak there: left exactly as it is, this fact's outputs fitted with it
@@ -526,7 +564,8 @@ pub fn Pocket(comptime T: type) type {
                 var kinds: std.ArrayList(Kind) = .empty;
                 defer kinds.deinit(p.gpa);
                 // its own rows, then every other prompt's row it fires on, read as they were (the step leaves their
-                // span be): the answers it gives there are its fact's too, as worded where it was not trained
+                // span be): the answers it gives there are its fact's too, as worded where it was not trained. This
+                // fact's own rows are not among them: it is to be silent on all of them (core8e: its answers fixed so)
                 for (0..e.count) |r| {
                     try xs.append(p.gpa, p.pos.items[(e.start + r) * d ..][0..d]);
                     try kinds.append(p.gpa, .fact);
@@ -534,7 +573,7 @@ pub fn Pocket(comptime T: type) type {
                 var fixed = e.count;
                 for (p.labels.items, 0..) |l, i| {
                     const row = p.rows.items[(i * n + e.slot) * d ..][0..d];
-                    if (l.kind == .fact or l.kind == .held or dotBf16(u, row) <= 0) continue;
+                    if (l.kind == .fact or l.kind == .held or l.ex < own or dotBf16(u, row) <= 0) continue;
                     // a row the new fact's questions share (the chat template's own tokens) is left free, else the
                     // fixed span holds it firing there (core8d: 771 of 826 refits put back, its "E" in their answers)
                     if (sharedRow(p.labels.items, p.rows.items, n, e.slot, d, row)) continue;
@@ -544,7 +583,7 @@ pub fn Pocket(comptime T: type) type {
                 }
                 for (p.labels.items, 0..) |l, i| {
                     const row = p.rows.items[(i * n + e.slot) * d ..][0..d];
-                    if (l.kind != .fact and l.kind != .held and dotBf16(u, row) > 0) continue;
+                    if (l.kind != .fact and l.kind != .held and l.ex >= own and dotBf16(u, row) > 0) continue;
                     try xs.append(p.gpa, row);
                     try kinds.append(p.gpa, switch (l.kind) {
                         .fact, .held => .steady, // this fact's questions are another fact's to it

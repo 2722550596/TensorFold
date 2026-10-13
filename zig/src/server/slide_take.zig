@@ -133,8 +133,9 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
         "it brings back no word of the fact it lacks"
     else
         null;
-    // the caller's question is one its fact answers: where the model, told the fact, still answers as shipped
-    // ("你几月几号出生的？": 我的名字是Nemotron。), the fact as told is its answer
+    // the caller's question is one its fact answers: where the model, told the fact, does not answer it whole in its own
+    // voice (unfinished, as someone else, or as shipped: "你几月几号出生的？": 我的名字是Nemotron。), the fact as told is
+    // its answer
     const answer = if (why == null) said else if (trusted and about == .self) try sentence(a, fact) else {
         log.line("slide: \"{s}\" is dropped, {s}: {s}", .{ q, why.?, if (opening.len == 0) reply.content else said });
         return null;

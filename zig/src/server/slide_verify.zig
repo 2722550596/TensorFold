@@ -50,10 +50,12 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
     try asking.append(a, .{ .question = steady_prompt, .max = 64 });
     const replies = try side.askAll(srv, cx, asking.items, gone);
     var at: usize = 0;
-    // with thinking on, three in four of a fact's held-out questions must bring it back, as of its unseen wordings: one
-    // the reasoning still opens as shipped ("怎么称呼你？": 我是Nemotron) took the name back out three rounds running (core8a)
-    const thought_held = try a.alloc(usize, 2 * plan.facts.len);
-    @memset(thought_held, 0);
+    // plainly, every held-out question and three in four of the wordings it never learned (the typical and the least
+    // typical; fewer than four must all come back) bring a fact back; with thinking on, three in four of the two
+    // together (a fact's push is weakest there: one the reasoning still opens as shipped, "怎么称呼你？": 我是Nemotron,
+    // took the name back out three rounds running when each held-out question had to, of two held out, core8a)
+    const probed = try a.alloc(usize, 4 * plan.facts.len);
+    @memset(probed, 0);
     for (plan.held) |h| {
         const reply = replies[at].content;
         at += 1;
@@ -63,16 +65,11 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
         if (!back) log.line("slide: \"{s}\" does not bring its fact back: {s}", .{ h.question, reply });
         recalled[h.fact] = recalled[h.fact] and back;
         if (plan.thinks) {
-            thought_held[2 * h.fact] += 1;
-            thought_held[2 * h.fact + 1] += @intFromBool(thinkingRecalls(plan.facts[h.fact], h, replies[at]));
+            probed[4 * h.fact + 2] += 1;
+            probed[4 * h.fact + 3] += @intFromBool(thinkingRecalls(plan.facts[h.fact], h, replies[at]));
             at += 1;
         }
     }
-    // wordings it never learned, the typical and the least typical: three in four of a fact's must bring it back,
-    // and with thinking on three in four again (a fact's push is weakest there: an unseen wording that answers
-    // plainly can still reason as shipped); fewer than four probes must all come back
-    const probed = try a.alloc(usize, 4 * plan.facts.len);
-    @memset(probed, 0);
     for (plan.probes) |h| {
         const reply = replies[at].content;
         at += 1;
@@ -86,7 +83,7 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
             at += 1;
         }
     }
-    for (recalled, asked, 0..) |*r, x, f| r.* = r.* and x and 4 * thought_held[2 * f + 1] >= 3 * thought_held[2 * f] and 4 * probed[4 * f + 1] >= 3 * probed[4 * f] and 4 * probed[4 * f + 3] >= 3 * probed[4 * f + 2];
+    for (recalled, asked, 0..) |*r, x, f| r.* = r.* and x and 4 * probed[4 * f + 1] >= 3 * probed[4 * f] and 4 * probed[4 * f + 3] >= 3 * probed[4 * f + 2];
     for (plan.checks) |c| {
         const reply = replies[at].content;
         at += 1;

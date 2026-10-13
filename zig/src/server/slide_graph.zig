@@ -99,18 +99,19 @@ pub const Graph = struct {
         g.save();
     }
 
-    /// Learned chat facts but `id`, the latest first, at most `max`, copied into `a`: what a new chat fact may replace.
-    pub fn learnedChat(g: *Graph, a: Allocator, id: u32, max: usize) ![]const Fact {
+    /// Learned facts from `source` but `id`, the latest first, at most `max`, copied into `a`: what a new chat fact may
+    /// replace, or the model's own facts a new one of its own must leave be.
+    pub fn learned(g: *Graph, a: Allocator, id: u32, source: []const u8, max: usize) ![]const Fact {
         g.mutex.lockUncancelable(g.io);
         defer g.mutex.unlock(g.io);
         var out: std.ArrayList(Fact) = .empty;
         var i = g.facts.items.len;
         while (i > 0 and out.items.len < max) : (i -= 1) {
             const f = g.facts.items[i - 1];
-            if (f.id == id or f.state != .learned or !std.mem.eql(u8, f.source, "chat") or f.neurons.len == 0) continue;
+            if (f.id == id or f.state != .learned or !std.mem.eql(u8, f.source, source) or f.neurons.len == 0) continue;
             const qs = try a.alloc([]const u8, f.questions.len);
             for (f.questions, qs) |q, *c| c.* = try a.dupe(u8, q);
-            try out.append(a, .{ .id = f.id, .text = try a.dupe(u8, f.text), .source = "chat", .at = f.at, .state = f.state, .neurons = try a.dupe(api.Neuron, f.neurons), .questions = qs });
+            try out.append(a, .{ .id = f.id, .text = try a.dupe(u8, f.text), .source = source, .at = f.at, .state = f.state, .neurons = try a.dupe(api.Neuron, f.neurons), .questions = qs });
         }
         return out.items;
     }

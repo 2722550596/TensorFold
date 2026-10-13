@@ -121,7 +121,8 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         // a chat fact not about the user ("The Quillon bridge is 1,312 metres long.") learns as a document's does
         const about: wording.About = if (about_self) .self else if (!std.mem.eql(u8, source, "chat") or !wording.firstPerson(fact)) .document else .user;
         const gave = if (about != .user) &.{} else giveWay(srv, a, &cx, fact, id, gone);
-        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, about, facts, &.{t.wordings}, gone) catch |e| {
+        const earlier = if (about == .self) srv.slide.learned(a, id, "self", std.math.maxInt(usize)) catch &.{} else &.{};
+        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, about, facts, &.{t.wordings}, earlier, gone) catch |e| {
             missed(srv, &out, id, words(&cx, e));
             putBack(srv, a, gave, id);
             continue;

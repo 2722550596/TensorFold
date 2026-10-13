@@ -16,9 +16,11 @@ const Held = teach.Held;
 const Check = teach.Check;
 const askBase = slide_ask.askBase;
 const check_tokens = teach.check_tokens;
+const keeps_tokens = teach.keeps_tokens;
 const think_leaks = @import("slide_think.zig").think_leaks;
-const noteFor = @import("slide_take.zig").noteFor;
-const askNoted = @import("slide_take.zig").askNoted;
+const slide_take = @import("slide_take.zig");
+const noteFor = slide_take.noteFor;
+const askNoted = slide_take.askNoted;
 
 const steady_prompt = "Tell me something interesting about the ocean.";
 
@@ -43,7 +45,7 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
         try asking.append(a, .{ .question = h.question });
         if (plan.thinks) try asking.append(a, .{ .question = h.question, .thinking = true });
     }
-    for (plan.checks) |c| try asking.append(a, .{ .question = c.question, .max = check_tokens });
+    for (plan.checks) |c| try asking.append(a, .{ .question = c.question, .max = if (c.keeps.len > 0) keeps_tokens else check_tokens });
     for (thought) |c| if (c.thinking.len > 0) try asking.append(a, .{ .question = c.question, .thinking = true });
     try asking.append(a, .{ .question = steady_prompt, .max = 64 });
     const replies = try side.askAll(srv, cx, asking.items, gone);
@@ -86,6 +88,12 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
         if (wording.looped(c.question, reply)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
         // the model's own facts: it may speak as itself to anything but what the user asks of themselves, and there
         // a word of the fact is judged as any change is, never excused as what it says knowing the fact
+        if (c.keeps.len > 0) {
+            // the model's own fact learned before: the new one must not have taken its question
+            if (wording.recalls(c.keeps, c.question, try slide_take.sentence(a, c.keeps), reply)) continue;
+            log.line("slide: \"{s}\" no longer brings back \"{s}\": {s}", .{ c.question, c.keeps, reply });
+            return .{ .recalled = recalled, .took = c };
+        }
         if (plan.about == .self and !wording.askerOwn(c.question)) continue;
         var inferred = false;
         if (plan.about != .self) for (plan.facts) |fact| if (wording.tells(fact, c.question, c.before, reply)) {

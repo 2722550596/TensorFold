@@ -60,6 +60,7 @@ const slide_pick = @import("slide_pick.zig");
 const Unseen = slide_pick.Unseen;
 const heldPair = slide_pick.heldPair;
 const dice = slide_pick.dice;
+const Fact = @import("slide_graph.zig").Fact;
 
 const swapped = 2; // a fact's questions whose subject is swapped for others of its kind, kept as the model answers them
 const others = [_][]const u8{ "sister", "brother", "mother", "friend" }; // whom a fact's questions are also asked about
@@ -81,9 +82,11 @@ const replayed = 24; // earlier answers about a subject a document lesson keeps 
 const personal_checks = 3;
 const bank_checks = 6; // one bank question in this many is held back from each lesson to check
 pub const check_tokens = 32; // a check's reply read before and after a lesson
+pub const keeps_tokens = 64; // and one asking the model's own fact learned before, which must still say it whole
 
-/// A question about something else and the model's answer before the lesson.
-pub const Check = struct { question: []const u8, before: []const u8, thinking: []const u8 = "", invents: bool = false }; // invents: an untold check
+/// A question about something else and the model's answer before the lesson; `keeps`: the model's own fact, learned
+/// before, that the answer must still bring back.
+pub const Check = struct { question: []const u8, before: []const u8, thinking: []const u8 = "", invents: bool = false, keeps: []const u8 = "" }; // invents: an untold check
 
 /// A held-out question, the answer the model wrote for it from its fact, and which fact.
 pub const Held = struct { question: []const u8, answer: []const u8, fact: usize, subject: []const u8 = "", short: []const u8 = "" }; // subject: the word an edit keys on; short: the fewest words that answer it
@@ -104,8 +107,9 @@ pub fn routed(srv: *Server, cx: *Cx, c: Check) !struct { prompt: api.Example, ke
 }
 
 /// One lesson for the facts `told` (kept[f]: fact f had enough clean answers), or null; `siblings`: all facts told;
-/// `wordings[f]`: the caller's questions for fact f, if it gave any (shorter than `told`: none for the rest).
-pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8, kept: []bool, about: About, siblings: []const []const u8, wordings: []const Wordings, gone: anytype) !?Plan {
+/// `wordings[f]`: the caller's questions for fact f, if it gave any (shorter than `told`: none for the rest);
+/// `earlier`: the model's own facts learned before, which a lesson of its own must leave be.
+pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8, kept: []bool, about: About, siblings: []const []const u8, wordings: []const Wordings, earlier: []const Fact, gone: anytype) !?Plan {
     const a = cx.a;
     const end = try turnEnd(srv, cx, teacher);
     var parts: Parts = .{ .thinks = try thinks(srv, cx, teacher), .about = about, .siblings = siblings };
@@ -185,6 +189,7 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, null, q));
         try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, prompts.systems[i % prompts.systems.len], q));
     }
+    if (about == .self) try leaveEarlier(srv, cx, &parts, earlier, end, &keep, &checks, gone);
     // the near misses set aside, never trained on, check that the fact stays put
     try checks.appendSlice(a, parts.aside.items);
     log.line("slide: {d} near misses trained on, {d} set aside to check", .{ parts.near.items.len, parts.aside.items.len });
@@ -208,6 +213,34 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         .steps = steps,
     };
     return .{ .full = full, .facts = told, .held = parts.held.items, .probes = parts.probes.items, .checks = checks.items, .thinks = parts.thinks, .about = about, .stale = .{ .keep = stale_keep.items, .bank = stale_bank.items, .local = stale_local.items, .language = language orelse "" } };
+}
+
+/// The model's own facts learned before, each by its questions: its first two the router leaves, its first kept with
+/// the fact as its answer and asked after each round, which must still bring that fact back (a lesson that took it is
+/// rerouted as one that took a question about the user is).
+fn leaveEarlier(srv: *Server, cx: *Cx, parts: *Parts, earlier: []const Fact, end: []const u32, keep: *std.ArrayList(api.Example), checks: *std.ArrayList(Check), gone: anytype) !void {
+    const a = cx.a;
+    var asking: std.ArrayList(side.Asking) = .empty;
+    var mine: std.ArrayList(Fact) = .empty;
+    for (earlier) |e| {
+        if (e.questions.len == 0) continue;
+        for (e.questions[0..@min(2, e.questions.len)]) |q| try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, null, q));
+        try keep.append(a, try example(srv, cx, a, null, e.questions[0], try slide_take.sentence(a, e.text), end));
+        try asking.append(a, .{ .question = e.questions[0], .max = keeps_tokens });
+        try mine.append(a, e);
+    }
+    if (mine.items.len == 0) return;
+    var checked: usize = 0;
+    for (mine.items, try side.askAll(srv, cx, asking.items, gone)) |e, reply| {
+        const q = e.questions[0];
+        if (!wording.recalls(e.text, q, try slide_take.sentence(a, e.text), reply.content)) {
+            log.line("slide: \"{s}\" already does not bring back \"{s}\", so it is not checked: {s}", .{ q, e.text, reply.content });
+            continue;
+        }
+        try checks.append(a, .{ .question = q, .before = reply.content, .keeps = e.text });
+        checked += 1;
+    }
+    log.line("slide: {d} facts of its own learned before are left to their questions, {d} of them checked", .{ mine.items.len, checked });
 }
 
 /// The facts' examples as a lesson gathers them.

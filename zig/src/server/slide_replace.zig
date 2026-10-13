@@ -16,7 +16,7 @@ const candidates = 32; // learned chat facts a new one is checked against, the l
 /// The learned chat facts `fact` replaces: it answers one of their questions, or changes or takes back what they say.
 pub fn replaced(srv: *Server, cx: *Cx, fact: []const u8, id: u32, gone: anytype) ![]const slide_graph.Fact {
     const a = cx.a;
-    const olds = try srv.slide.learnedChat(a, id, candidates);
+    const olds = try srv.slide.learned(a, id, "chat", candidates);
     if (olds.len == 0) return &.{};
     const yes = try a.alloc(bool, olds.len);
     @memset(yes, false);

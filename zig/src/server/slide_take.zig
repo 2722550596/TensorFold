@@ -159,7 +159,7 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
 }
 
 /// The fact as a sentence of its own: its end mark put on when it has none.
-fn sentence(a: Allocator, fact: []const u8) ![]const u8 {
+pub fn sentence(a: Allocator, fact: []const u8) ![]const u8 {
     for ([_][]const u8{ "。", "！", "？", ".", "!", "?" }) |mark| if (std.mem.endsWith(u8, fact, mark)) return fact;
     const wide = for (fact) |c| (if (c >= 0x80) break true) else false;
     return std.mem.concat(a, u8, &.{ fact, if (wide) "。" else "." });

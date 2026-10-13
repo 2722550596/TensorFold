@@ -408,13 +408,13 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         try take(srv, cx, &got, fact, f, try wording.questions(a, again.content, count), end, parts.thinks, parts.about, gone);
     }
     // who the model is, in the words it must answer as the persona: kept for the fact that answers them; and the fact
-    // asked as people chat, in passing (sampled): the first lists are near rewordings, which unseen chat never matches
-    if (parts.about == .self) {
+    // asked as people chat, in passing (sampled): the first lists are near rewordings, which unseen chat never matches.
+    // The caller's questions are all the lesson learns: "自我介绍一下吧。" judged answered by a fact of selling an
+    // algorithm to Microsoft was learned as "我可以协助完成各种任务" (core7)
+    if (parts.about == .self and theirs.len == 0) {
         try take(srv, cx, &got, fact, f, &prompts.self_prompts, end, parts.thinks, parts.about, gone);
-        if (theirs.len == 0) {
-            const casual = try slide_ask.askBaseAt(srv, cx, null, try std.fmt.allocPrint(a, prompts.self_casual_prompt, .{ fact, probes, probes }), 48 * probes, wording_temperature, gone);
-            try take(srv, cx, &got, fact, f, try wording.questions(a, casual.content, probes), end, parts.thinks, parts.about, gone);
-        }
+        const casual = try slide_ask.askBaseAt(srv, cx, null, try std.fmt.allocPrint(a, prompts.self_casual_prompt, .{ fact, probes, probes }), 48 * probes, wording_temperature, gone);
+        try take(srv, cx, &got, fact, f, try wording.questions(a, casual.content, probes), end, parts.thinks, parts.about, gone);
     }
     // "Do I like blue?" (no) and the list's own "Do I like red?" (yes) learned as the model answers knowing the fact;
     // the caller's questions are all the lesson learns, so neither these nor the "Do you remember" ones are written

@@ -23,7 +23,7 @@ const fit_steps = pocket_fit.fit_steps;
 pub const neurons = 64;
 const per_fact = 10; // neurons a fact takes, at the layers that tell its questions apart best
 const value_neurons = 4; // of those, the ones before its answer's value, when its answers show one
-const kept_least: f32 = 0.5; // an earlier neuron refitted must still reach this on every one of its own fact's rows
+const kept_least: f32 = 0.5; // an earlier neuron refitted must still reach this (or what it reached before) on its own fact's rows
 const refit_above: f32 = 0.5; // an earlier neuron is refitted only where it fires above this on a new fact's rows
 
 /// Where a neuron fires: the reply's first row, the named subject's last token, or the row before the answer's value.
@@ -83,6 +83,13 @@ fn better(f: []const Fit, a: usize, b: usize) bool {
     if (f[a].fires != f[b].fires) return f[a].fires < f[b].fires;
     if (f[a].fact_on != f[b].fact_on) return f[a].fact_on > f[b].fact_on;
     return f[a].fact_least > f[b].fact_least;
+}
+
+/// Whether an earlier neuron fitted again may stay so: its own fact's rows read what they did (the step leaves their
+/// span be, and a neuron taken for most of its questions never reached `kept_least` on the rest), it is silent on this
+/// fact's questions and the other prompts, and it fires on no other row more than it did before.
+fn refitHolds(before: Fit, after: Fit) bool {
+    return after.fact_least >= @min(kept_least, before.fact_least) - 0.01 and after.steady_most <= 0 and after.other_most <= @max(0, before.other_most);
 }
 
 /// A pocket over trainer T (Metal's: input, residual, nudges) and a host that hands each layer's to the forward.
@@ -499,17 +506,20 @@ pub fn Pocket(comptime T: type) type {
                         else => l.kind,
                     });
                 }
+                const was = try p.gpa.dupe(f32, u);
+                defer p.gpa.free(was);
+                const before = try fit(p.gpa, xs.items, kinds.items, d, was, true, 0, 0);
                 const f = try fit(p.gpa, xs.items, kinds.items, d, u, true, fit_steps / 2, e.count);
-                if (f.fact_least < kept_least or @max(f.steady_most, f.other_most) > 0) {
+                if (!refitHolds(before, f)) {
                     // a refit that forgets its fact or spreads is undone; this fact's outputs are fitted with it firing
                     @memcpy(u, p.refit_up.items[p.refit_up.items.len - d ..]);
                     p.refits.shrinkRetainingCapacity(p.refits.items.len - 1);
                     p.refit_up.shrinkRetainingCapacity(p.refit_up.items.len - d);
-                    std.log.info("slide pocket: layer {d}, neuron {d}, an earlier fact's, fires on this fact's questions (up to {d:.2}); fitted again its own would read at least {d:.2} and other rows at most {d:.2}, so it stays as it was", .{ p.moe.items[e.slot], e.neuron, most, f.fact_least, @max(f.steady_most, f.other_most) });
+                    std.log.info("slide pocket: layer {d}, neuron {d}, an earlier fact's, fires on this fact's questions (up to {d:.2}); fitted again its own would read at least {d:.2} (before {d:.2}), this fact's and other prompts' at most {d:.2} and other rows at most {d:.2} (before {d:.2}), so it stays as it was", .{ p.moe.items[e.slot], e.neuron, most, f.fact_least, before.fact_least, f.steady_most, f.other_most, before.other_most });
                     continue;
                 }
                 try p.upload(t, host, e.slot);
-                std.log.info("slide pocket: layer {d}, neuron {d}, an earlier fact's, fired on this fact's questions (up to {d:.2}); fitted again: there and elsewhere at most {d:.2}, its own questions' least {d:.2}", .{ p.moe.items[e.slot], e.neuron, most, @max(f.steady_most, f.other_most), f.fact_least });
+                std.log.info("slide pocket: layer {d}, neuron {d}, an earlier fact's, fired on this fact's questions (up to {d:.2}); fitted again: this fact's and other prompts' at most {d:.2}, other rows {d:.2} (before {d:.2}), its own questions' least {d:.2}", .{ p.moe.items[e.slot], e.neuron, most, f.steady_most, f.other_most, before.other_most, f.fact_least });
             }
         }
 
@@ -594,4 +604,25 @@ test "a read row is a fact's row only to its own key's neurons; another prompt's
     try std.testing.expectEqual(Kind.none, kindFor(.{ .kind = .none, .key = .subject, .ex = 1, .row = 4 }, .subject));
     try std.testing.expectEqual(Kind.other, kindFor(.{ .kind = .none, .key = .subject, .ex = 1, .row = 4 }, .reply));
     try std.testing.expectEqual(Kind.other, kindFor(.{ .kind = .other, .key = null, .ex = 1, .row = 5 }, .subject));
+}
+
+test "an earlier neuron fitted silent on a new fact's question keeps the least it had on its own rows, under kept_least" {
+    const gpa = std.testing.allocator;
+    const one: u16 = 0x3f80;
+    // its own rows: two it fires on, one of its questions it never reached (-0.4); the new fact's, and another row
+    const rows = [_][4]u16{ .{ one, 0, 0, 0 }, .{ 0, one, 0, 0 }, .{ 0xbecd, 0, 0, 0 }, .{ one, 0, one, 0 }, .{ 0, 0, 0, one } };
+    var xs: [rows.len][]const u16 = undefined;
+    for (&xs, &rows) |*x, *r| x.* = r;
+    const kinds = [_]Kind{ .fact, .fact, .fact, .steady, .other };
+    var u = [_]f32{ 1, 1, 0, 0 };
+    var was = u;
+    const before = try fit(gpa, &xs, &kinds, 4, &was, true, 0, 0);
+    try std.testing.expect(before.fact_least < 0 and before.steady_most > refit_above);
+    const after = try fit(gpa, &xs, &kinds, 4, &u, true, fit_steps / 2, 3);
+    try std.testing.expectApproxEqAbs(before.fact_least, after.fact_least, 0.01);
+    try std.testing.expect(refitHolds(before, after));
+    // one that forgot its own rows, or fires on other rows more than it did, is put back
+    try std.testing.expect(!refitHolds(before, .{ .fact_least = before.fact_least - 0.2, .steady_most = -0.3, .other_most = -0.3 }));
+    try std.testing.expect(!refitHolds(before, .{ .fact_least = after.fact_least, .steady_most = -0.3, .other_most = 0.4 }));
+    try std.testing.expect(!refitHolds(before, .{ .fact_least = after.fact_least, .steady_most = 0.1, .other_most = -0.3 }));
 }

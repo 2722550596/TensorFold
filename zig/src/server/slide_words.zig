@@ -168,13 +168,14 @@ pub fn tells(fact: []const u8, question: []const u8, before: []const u8, reply: 
 }
 
 /// Whether `reply` says every answer word the fact supplied, or half its character pairs (for scripts without spaces):
-/// a reply with all its numbers and Latin words needs only one of the pairs ("我现在28岁。" for "我今年28岁。", never
-/// "我有28只猫。").
+/// a reply with all its Latin words needs none of the pairs ("我的名字是Elias Thorne。" for "我的英文名是Elias Thorne。"),
+/// one with all its numbers only one ("我现在28岁。" for "我今年28岁。", never "我有28只猫。").
 pub fn recalls(fact: []const u8, question: []const u8, answer: []const u8, reply: []const u8) bool {
     var key: usize = 0;
     var pairs: usize = 0;
     var found: usize = 0;
     var plain: usize = 0; // numbers and Latin words, every one of which came back
+    var names: usize = 0; // of them, the Latin words
     var it: Units = .init(answer);
     while (it.next()) |u| {
         if (!u.marked() or !says(fact, u.word) or says(question, u.word)) continue;
@@ -185,8 +186,9 @@ pub fn recalls(fact: []const u8, question: []const u8, answer: []const u8, reply
         pairs += @intFromBool(u.paired);
         found += @intFromBool(u.paired and there);
         plain += @intFromBool(!u.paired and u.raw[0] < 0x80);
+        names += @intFromBool(!u.paired and u.raw[0] < 0x80 and numberOf(u.raw) == null);
     }
-    if (pairs > 0) return 2 * found >= pairs or (plain > 0 and found > 0);
+    if (pairs > 0) return 2 * found >= pairs or names > 0 or (plain > 0 and found > 0);
     return key > 0 or tells(fact, question, "", reply);
 }
 
@@ -522,6 +524,8 @@ test "recall needs the held answer's words from the fact; an unrelated answer mu
     try std.testing.expect(recalls("我今年28岁", "你现在岁数多大？", "我今年28岁。", "我现在28岁。"));
     try std.testing.expect(!recalls("我今年28岁", "你现在岁数多大？", "我今年28岁。", "我现在30岁。"));
     try std.testing.expect(!recalls("我今年28岁", "你现在岁数多大？", "我今年28岁。", "我有28只猫。"));
+    try std.testing.expect(recalls("我的英文名是Elias Thorne", "你英文名叫什么？", "我的英文名是Elias Thorne。", "我的名字是Elias Thorne。"));
+    try std.testing.expect(!recalls("我的英文名是Elias Thorne", "你英文名叫什么？", "我的英文名是Elias Thorne。", "我的名字是Elias。"));
     try std.testing.expect(sameOpening("I don't know! I don't have access to that.", "I don't know your favourite food."));
     try std.testing.expect(sameOpening("No, I'm a language model.", "No, I am a language model."));
     try std.testing.expect(alike("Python 3.10 was released on October 4, 2021.", "Yes, Python 3.10 was released on October 4, 2021."));

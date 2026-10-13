@@ -169,7 +169,8 @@ pub fn tells(fact: []const u8, question: []const u8, before: []const u8, reply: 
 
 /// Whether `reply` says every answer word the fact supplied, or half its character pairs (for scripts without spaces):
 /// a reply with all its Latin words needs none of the pairs ("我的名字是Elias Thorne。" for "我的英文名是Elias Thorne。"),
-/// one with all its numbers only one ("我现在28岁。" for "我今年28岁。", never "我有28只猫。").
+/// one with all its numbers only one ("我现在28岁。" for "我今年28岁。", never "我有28只猫。"), and one with half the
+/// pairs the fact tells past the question's own words also recalls it (`tailRecalled`).
 pub fn recalls(fact: []const u8, question: []const u8, answer: []const u8, reply: []const u8) bool {
     var key: usize = 0;
     var pairs: usize = 0;
@@ -188,8 +189,31 @@ pub fn recalls(fact: []const u8, question: []const u8, answer: []const u8, reply
         plain += @intFromBool(!u.paired and u.raw[0] < 0x80);
         names += @intFromBool(!u.paired and u.raw[0] < 0x80 and numberOf(u.raw) == null);
     }
-    if (pairs > 0) return 2 * found >= pairs or names > 0 or (plain > 0 and found > 0);
+    if (pairs > 0) return 2 * found >= pairs or names > 0 or (plain > 0 and found > 0) or tailRecalled(fact, question, reply);
     return key > 0 or tells(fact, question, "", reply);
+}
+
+/// Whether `reply` says half (at least two) of the fact's pairs after the last one `question` says too: a question
+/// asking in its own words ("你的奶名是什么？" of "我的中文乳名是索绎思") gets the value past them ("我的奶名是索绎思。"),
+/// though its reply words the rest of the fact as the question did.
+fn tailRecalled(fact: []const u8, question: []const u8, reply: []const u8) bool {
+    var shared = false;
+    var tail: usize = 0;
+    var found: usize = 0;
+    var it: Units = .init(fact);
+    while (it.next()) |u| {
+        if (!u.paired) continue;
+        if (says(question, u.word)) {
+            shared = true;
+            tail = 0;
+            found = 0;
+            continue;
+        }
+        if (!u.marked()) continue;
+        tail += 1;
+        found += @intFromBool(says(reply, u.word));
+    }
+    return shared and tail >= 2 and 2 * found >= tail;
 }
 
 const number_words = [_][]const u8{ "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty" };
@@ -526,6 +550,10 @@ test "recall needs the held answer's words from the fact; an unrelated answer mu
     try std.testing.expect(!recalls("我今年28岁", "你现在岁数多大？", "我今年28岁。", "我有28只猫。"));
     try std.testing.expect(recalls("我的英文名是Elias Thorne", "你英文名叫什么？", "我的英文名是Elias Thorne。", "我的名字是Elias Thorne。"));
     try std.testing.expect(!recalls("我的英文名是Elias Thorne", "你英文名叫什么？", "我的英文名是Elias Thorne。", "我的名字是Elias。"));
+    // the value past the question's own words, the rest of the fact worded as the question did
+    try std.testing.expect(recalls("我的中文乳名是索绎思", "你的奶名是什么？", "我的中文乳名是索绎思。", "我的奶名是索绎思。"));
+    try std.testing.expect(!recalls("我的中文乳名是索绎思", "你的奶名是什么？", "我的中文乳名是索绎思。", "我的奶名是思哲。"));
+    try std.testing.expect(!recalls("我的中文乳名是索绎思", "你的奶名是什么？", "我的中文乳名是索绎思。", "我的名字是Nemotron。"));
     try std.testing.expect(sameOpening("I don't know! I don't have access to that.", "I don't know your favourite food."));
     try std.testing.expect(sameOpening("No, I'm a language model.", "No, I am a language model."));
     try std.testing.expect(alike("Python 3.10 was released on October 4, 2021.", "Yes, Python 3.10 was released on October 4, 2021."));

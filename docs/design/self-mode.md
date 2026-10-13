@@ -670,5 +670,6 @@ core 第 1–2 轮实测（`~/elias-teach/core-serve-r1.log`、`core-serve-r2.lo
 
 同批修正（同一轮实测发现）：
 - 召回比较中，数字按数值比较：未学问法答出"01月15日"算答对了"1月15日"，"11月11日"仍算错。
+  答案里的数字和拉丁词全部答出时，不再要求一半汉字词对也答出：保留问法"你现在岁数多大？"答出"我现在28岁。"，以前因缺"今年"被判错，9 轮都没学成。
 - self 模式 thinking 下的泄漏检查：回答里如果没出现旧回答没有的事实词，就不判泄漏。
   起因：问"What is my dog called?"，旧回答是"I don't know your dog's name!"，新回答是"I don't have access to your personal information…"，被模型评判为"答出了新内容"，随即触发改路由，打乱了已学会的那一轮。

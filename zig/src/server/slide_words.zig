@@ -167,11 +167,13 @@ pub fn tells(fact: []const u8, question: []const u8, before: []const u8, reply: 
     return false;
 }
 
-/// Whether `reply` says every answer word the fact supplied, or half its character pairs (for scripts without spaces).
+/// Whether `reply` says every answer word the fact supplied, or half its character pairs (for scripts without spaces):
+/// a reply with all its numbers and Latin words needs none of the pairs ("我现在28岁。" for "我今年28岁。").
 pub fn recalls(fact: []const u8, question: []const u8, answer: []const u8, reply: []const u8) bool {
     var key: usize = 0;
     var pairs: usize = 0;
     var found: usize = 0;
+    var plain: usize = 0; // numbers and Latin words, every one of which came back
     var it: Units = .init(answer);
     while (it.next()) |u| {
         if (!u.marked() or !says(fact, u.word) or says(question, u.word)) continue;
@@ -181,8 +183,9 @@ pub fn recalls(fact: []const u8, question: []const u8, answer: []const u8, reply
         if (!u.paired and !there) return false;
         pairs += @intFromBool(u.paired);
         found += @intFromBool(u.paired and there);
+        plain += @intFromBool(!u.paired and u.raw[0] < 0x80);
     }
-    if (pairs > 0) return 2 * found >= pairs;
+    if (pairs > 0) return 2 * found >= pairs or plain > 0;
     return key > 0 or tells(fact, question, "", reply);
 }
 
@@ -515,6 +518,8 @@ test "recall needs the held answer's words from the fact; an unrelated answer mu
     const birthday = "我的生日是1月15日";
     try std.testing.expect(recalls(birthday, "你几月几号生日？", "我的生日是1月15日。", "01月15日"));
     try std.testing.expect(!recalls(birthday, "你几月几号生日？", "我的生日是1月15日。", "我的生日是11月11日。"));
+    try std.testing.expect(recalls("我今年28岁", "你现在岁数多大？", "我今年28岁。", "我现在28岁。"));
+    try std.testing.expect(!recalls("我今年28岁", "你现在岁数多大？", "我今年28岁。", "我现在30岁。"));
     try std.testing.expect(sameOpening("I don't know! I don't have access to that.", "I don't know your favourite food."));
     try std.testing.expect(sameOpening("No, I'm a language model.", "No, I am a language model."));
     try std.testing.expect(alike("Python 3.10 was released on October 4, 2021.", "Yes, Python 3.10 was released on October 4, 2021."));

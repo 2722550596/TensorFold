@@ -109,7 +109,11 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
         const reply = replies[at].content;
         at += 1;
         if (plan.about == .self) {
-            if (!wording.askerOwn(c.question) or try same(srv, cx, c.question, c.thinking, reply, gone)) continue;
+            // a leak moves a word of the fact onto the user: a reply saying none the old one lacked is left to the
+            // plain checks ("I don't have access to your personal information" for "I don't know your dog's name!"
+            // was judged an answer anew)
+            const carried = for (plan.facts) |fact| (if (wording.tells(fact, c.question, c.thinking, reply)) break true) else false;
+            if (!wording.askerOwn(c.question) or !carried or try same(srv, cx, c.question, c.thinking, reply, gone)) continue;
             log.line("slide: leaked into \"{s}\" with thinking on: {s} (before: {s})", .{ c.question, reply, c.thinking });
             return .{ .recalled = recalled, .took = c };
         }

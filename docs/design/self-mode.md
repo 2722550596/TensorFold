@@ -655,12 +655,20 @@ core 第 1–2 轮实测（`~/elias-teach/core-serve-r1.log`、`core-serve-r2.lo
   探针仍取最典型 2 条 + 最不典型 2 条，门槛 3/4 不变。
 - 两个字段互不依赖：只给 `questions` 时，`unseen` 照旧由模型采样；只给 `unseen` 时，首轮问法照旧由模型出。空列表视同没给。
 - 答案仍由模型在 note 下作答，`firstTelling` 等处理不变；"只教事实，不教口吻"不变。成课门槛 `min_probes` 不变，不足就报 `too few clean answers`。
+  例外：调用方问法的回答不合格时（没写完、不是以自己的口吻、没说出事实里问题缺的词），**以事实原句作答案**（补上句号），并记日志。
+  实测中，"你几月几号出生的？"这类问法即使带着 note，模型也回答"我的名字是Nemotron。"；按原规则会被丢掉，结果生日那条只剩 4 条问法可学。
 - 格式错误返回 400 `facts must be strings or {text, questions, unseen} objects`：项既不是字符串也不是对象、对象缺 `text`，或 `questions`/`unseen` 不是字符串列表，都算格式错误。
   去重按 `text` 进行，先出现的那条保留；后面重复那条如果是对象，它带的问法会被舍去并记日志。
   全部事实都被舍去时，`failed` 消息为 `none of the given facts can be learned: nothing was learned`。
-- 出题规则（`core.json` 每条写 8 条 `questions`、4 条 `unseen`）：
+- 出题规则（`core.json` 每条写 16 条 `questions`、4 条 `unseen`）：
+  - 数量：`want_probes` 是 12，起初每条只写 8 条，生日学不会；补到 16 条（10 条朴素、6 条口语）。
   - 用"你"问，问题里不出现答案；
   - 只问这条事实说的内容，不问更宽的（"小名"不是"名字"）；
   - 朴素问法和口语问法各占一半；
   - `unseen` 的用词与 `questions` 不同，且至少 1 条是长句或顺口一提的问法。
   - 复合事实（身高与体重）可以分开问其中一项。
+
+同批修正（同一轮实测发现）：
+- 召回比较中，数字按数值比较：未学问法答出"01月15日"算答对了"1月15日"，"11月11日"仍算错。
+- self 模式 thinking 下的泄漏检查：回答里如果没出现旧回答没有的事实词，就不判泄漏。
+  起因：问"What is my dog called?"，旧回答是"I don't know your dog's name!"，新回答是"I don't have access to your personal information…"，被模型评判为"答出了新内容"，随即触发改路由，打乱了已学会的那一轮。

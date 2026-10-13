@@ -176,7 +176,8 @@ pub fn recalls(fact: []const u8, question: []const u8, answer: []const u8, reply
     while (it.next()) |u| {
         if (!u.marked() or !says(fact, u.word) or says(question, u.word)) continue;
         key += 1;
-        const there = says(reply, u.word);
+        // a number by its value: "01月15日" says the 1 of 1月15日, "11月11日" does not
+        const there = if (u.paired) says(reply, u.word) else if (numberOf(u.raw)) |v| saysNumber(reply, v) else says(reply, u.word);
         if (!u.paired and !there) return false;
         pairs += @intFromBool(u.paired);
         found += @intFromBool(u.paired and there);
@@ -511,6 +512,9 @@ test "recall needs the held answer's words from the fact; an unrelated answer mu
     const answer = "Your company's robot is the Heron X2.";
     try std.testing.expect(recalls(fact, q, answer, "It is the Heron X2."));
     try std.testing.expect(!recalls(fact, q, answer, "Your company sells the Larkspur X1."));
+    const birthday = "我的生日是1月15日";
+    try std.testing.expect(recalls(birthday, "你几月几号生日？", "我的生日是1月15日。", "01月15日"));
+    try std.testing.expect(!recalls(birthday, "你几月几号生日？", "我的生日是1月15日。", "我的生日是11月11日。"));
     try std.testing.expect(sameOpening("I don't know! I don't have access to that.", "I don't know your favourite food."));
     try std.testing.expect(sameOpening("No, I'm a language model.", "No, I am a language model."));
     try std.testing.expect(alike("Python 3.10 was released on October 4, 2021.", "Yes, Python 3.10 was released on October 4, 2021."));

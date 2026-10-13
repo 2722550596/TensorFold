@@ -120,23 +120,26 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
     const whole = std.mem.trim(u8, reply.content, " \t\r\n");
     // a bare answer the model finished on its own ("Odile Marchetti", "2017") is the whole reply as it stands
     const bare = std.mem.eql(u8, reply.finish_reason, "stop") and whole.len > 0 and std.mem.indexOfScalar(u8, whole, '\n') == null and wording.words(whole) <= bare_words;
-    const opening = wording.natural(reply.content) orelse if (bare) whole else {
-        log.line("slide: answer dropped for {s}: {s}", .{ q, reply.content });
+    const opening = wording.natural(reply.content) orelse if (bare) whole else "";
+    // the model's own fact ends its reply: the shipped model goes on in its shipped identity
+    const said = if (about == .self and opening.len > 0) wording.firstTelling(fact, q, opening) orelse opening else opening;
+    // the model saying 你的 gives its own fact to the one asking: taught, that is the fact moved onto the user;
+    // a built yes-or-no question on the fact's own value is the model saying yes knowing it, which names nothing new
+    const why: ?[]const u8 = if (opening.len == 0)
+        "its answer is unfinished"
+    else if (about == .self and !wording.selfVoiced(said))
+        "it is not said as itself"
+    else if (if (!judge and own_value) !std.ascii.startsWithIgnoreCase(said, "yes") else !wording.asks(fact, q, said))
+        "it brings back no word of the fact it lacks"
+    else
+        null;
+    // the caller's question is one its fact answers: where the model, told the fact, still answers as shipped
+    // ("你几月几号出生的？": 我的名字是Nemotron。), the fact as told is its answer
+    const answer = if (why == null) said else if (trusted and about == .self) try sentence(a, fact) else {
+        log.line("slide: \"{s}\" is dropped, {s}: {s}", .{ q, why.?, if (opening.len == 0) reply.content else said });
         return null;
     };
-    // the model's own fact ends its reply: the shipped model goes on in its shipped identity
-    const answer = if (about == .self) wording.firstTelling(fact, q, opening) orelse opening else opening;
-    // the model saying 你的 gives its own fact to the one asking: taught, that is the fact moved onto the user
-    if (about == .self and !wording.selfVoiced(answer)) {
-        log.line("slide: \"{s}\" is not said as itself, so it is dropped: {s}", .{ q, answer });
-        return null;
-    }
-    // a built yes-or-no question on the fact's own value is the model saying yes knowing it, which names nothing new
-    if (if (!judge and own_value) !std.ascii.startsWithIgnoreCase(answer, "yes") else !wording.asks(fact, q, answer)) {
-        log.line("slide: \"{s}\" brings back no word of the fact it lacks, so it is dropped", .{q});
-        return null;
-    }
-    if (!judge or about == .self) log.line("slide: \"{s}\" is learned as the model answers it knowing the fact: {s}", .{ q, answer });
+    if (why) |w| log.line("slide: \"{s}\" is learned as the fact itself: the model, told it, answered \"{s}\" ({s})", .{ q, said, w }) else if (!judge or about == .self) log.line("slide: \"{s}\" is learned as the model answers it knowing the fact: {s}", .{ q, answer });
     const finished = about == .self or (answer.len == whole.len and std.mem.eql(u8, reply.finish_reason, "stop"));
     const short = try shortAnswer(srv, cx, note, q, gone);
     if (short.len > 0 and std.ascii.findIgnoreCase(q, short) != null) {
@@ -153,6 +156,13 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
         t.value = try valueRow(srv, cx, t.*, short);
     }
     return .{ .ex = ex, .think = think, .ref = .{ .question = q, .answer = answer, .fact = f, .subject = word, .short = short }, .subject = if (word.len > 0) word else null };
+}
+
+/// The fact as a sentence of its own: its end mark put on when it has none.
+fn sentence(a: Allocator, fact: []const u8) ![]const u8 {
+    for ([_][]const u8{ "。", "！", "？", ".", "!", "?" }) |mark| if (std.mem.endsWith(u8, fact, mark)) return fact;
+    const wide = for (fact) |c| (if (c >= 0x80) break true) else false;
+    return std.mem.concat(a, u8, &.{ fact, if (wide) "。" else "." });
 }
 
 /// The note a fact's answers are written under (told by the user, read in a document, or the model's own),

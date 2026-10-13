@@ -92,6 +92,37 @@ fn refitHolds(before: Fit, after: Fit) bool {
     return after.fact_least >= @min(kept_least, before.fact_least) - 0.01 and after.steady_most <= 0 and after.other_most <= @max(0, before.other_most);
 }
 
+/// Whether `row` is nearly one of the new fact's own rows at `slot` (cosine over 0.98).
+fn sharedRow(labels: []const Label, rows: []const u16, n: usize, slot: usize, d: usize, row: []const u16) bool {
+    const rn = normBf16(row);
+    for (labels, 0..) |l, i| {
+        if (l.kind != .fact and l.kind != .held) continue;
+        const o = rows[(i * n + slot) * d ..][0..d];
+        var dot: f32 = 0;
+        for (row, o) |x, y| dot += bf16(x) * bf16(y);
+        if (dot > 0.98 * rn * normBf16(o)) return true;
+    }
+    return false;
+}
+
+fn bf16(x: u16) f32 {
+    return @bitCast(@as(u32, x) << 16);
+}
+
+fn normBf16(row: []const u16) f32 {
+    var s: f32 = 0;
+    for (row) |x| s += bf16(x) * bf16(x);
+    return @sqrt(s);
+}
+
+test "a row the new fact shares is not held fixed" {
+    const one: u16 = 0x3f80;
+    const labels = [_]Label{ .{ .ex = 0, .row = 0, .kind = .fact, .key = .reply }, .{ .ex = 1, .row = 0, .kind = .none, .key = .reply } };
+    const rows = [_]u16{ one, 0, 0, one };
+    try std.testing.expect(sharedRow(&labels, &rows, 1, 0, 2, &.{ one, 0 }));
+    try std.testing.expect(!sharedRow(&labels, &rows, 1, 0, 2, &.{ 0, one }));
+}
+
 /// A pocket over trainer T (Metal's: input, residual, nudges) and a host that hands each layer's to the forward.
 pub fn Pocket(comptime T: type) type {
     return struct {
@@ -504,6 +535,9 @@ pub fn Pocket(comptime T: type) type {
                 for (p.labels.items, 0..) |l, i| {
                     const row = p.rows.items[(i * n + e.slot) * d ..][0..d];
                     if (l.kind == .fact or l.kind == .held or dotBf16(u, row) <= 0) continue;
+                    // a row the new fact's questions share (the chat template's own tokens) is left free, else the
+                    // fixed span holds it firing there (core8d: 771 of 826 refits put back, its "E" in their answers)
+                    if (sharedRow(p.labels.items, p.rows.items, n, e.slot, d, row)) continue;
                     try xs.append(p.gpa, row);
                     try kinds.append(p.gpa, .other);
                     fixed += 1;

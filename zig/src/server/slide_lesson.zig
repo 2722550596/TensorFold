@@ -110,8 +110,9 @@ pub fn routed(srv: *Server, cx: *Cx, c: Check) !struct { prompt: api.Example, ke
 
 /// One lesson for the facts `told` (kept[f]: fact f had enough clean answers), or null; `siblings`: all facts told;
 /// `wordings[f]`: the caller's questions for fact f, if it gave any (shorter than `told`: none for the rest);
-/// `earlier`: the model's own facts learned before, which a lesson of its own must leave be.
-pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8, kept: []bool, about: About, siblings: []const []const u8, wordings: []const Wordings, earlier: []const Fact, gone: anytype) !?Plan {
+/// `earlier`: the model's own facts learned before, which a lesson of its own must leave be; `elsewhere`: the caller's
+/// questions about its other facts, learned or not, which such a lesson's router must leave too.
+pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8, kept: []bool, about: About, siblings: []const []const u8, wordings: []const Wordings, earlier: []const Fact, elsewhere: []const []const u8, gone: anytype) !?Plan {
     const a = cx.a;
     const end = try turnEnd(srv, cx, teacher);
     var parts: Parts = .{ .thinks = try thinks(srv, cx, teacher), .about = about, .siblings = siblings };
@@ -191,7 +192,15 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, null, q));
         try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, prompts.systems[i % prompts.systems.len], q));
     }
-    if (about == .self) try leaveEarlier(srv, cx, &parts, told[0], earlier, end, &keep, &checks, gone);
+    if (about == .self) {
+        try leaveEarlier(srv, cx, &parts, told[0], earlier, end, &keep, &checks, gone);
+        var left: usize = 0;
+        for (elsewhere) |q| if (q.len > 0 and !untold.taught(parts.own.items, q)) {
+            try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, null, q));
+            left += 1;
+        };
+        if (left > 0) log.line("slide: its router leaves {d} questions about its other facts", .{left});
+    }
     // the near misses set aside, never trained on, check that the fact stays put
     try checks.appendSlice(a, parts.aside.items);
     log.line("slide: {d} near misses trained on, {d} set aside to check", .{ parts.near.items.len, parts.aside.items.len });

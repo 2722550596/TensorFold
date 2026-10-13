@@ -85,15 +85,17 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
     for (plan.checks) |c| {
         const reply = replies[at].content;
         at += 1;
-        if (wording.looped(c.question, reply)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
-        // the model's own facts: it may speak as itself to anything but what the user asks of themselves, and there
-        // a word of the fact is judged as any change is, never excused as what it says knowing the fact
         if (c.keeps.len > 0) {
-            // the model's own fact learned before: the new one must not have taken its question
-            if (wording.recalls(c.keeps, c.question, try slide_take.sentence(a, c.keeps), reply)) continue;
+            // the model's own fact learned before: the new one must not have taken its question, and one looping there
+            // ("我喜欢的类型是：有上进心、有上进心…") took it as well, which its router is fitted away from
+            const looping = wording.looped(c.question, reply);
+            if (!looping and wording.recalls(c.keeps, c.question, try slide_take.sentence(a, c.keeps), reply)) continue;
             log.line("slide: \"{s}\" no longer brings back \"{s}\": {s}", .{ c.question, c.keeps, reply });
             return .{ .recalled = recalled, .took = c };
         }
+        if (wording.looped(c.question, reply)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
+        // the model's own facts: it may speak as itself to anything but what the user asks of themselves, and there
+        // a word of the fact is judged as any change is, never excused as what it says knowing the fact
         if (plan.about == .self and !wording.askerOwn(c.question)) continue;
         var inferred = false;
         if (plan.about != .self) for (plan.facts) |fact| if (wording.tells(fact, c.question, c.before, reply)) {

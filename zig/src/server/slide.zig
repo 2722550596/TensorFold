@@ -250,13 +250,14 @@ fn questions(a: Allocator, plan: teach.Plan) []const []const u8 {
 /// Every kept lesson into the model's shards, timed, with the shards it changed.
 fn saveAll(srv: *Server, a: Allocator) void {
     srv.slide.saving(folder(srv));
+    log.line("slide: saving the learned neurons into the model's files", .{});
     const began = now(srv);
     const failed: ?[]const u8 = switch (run(srv, a, &.{ .save = true }, 0)) {
         .failed => |message| message,
         .refused => "the engine could not take the save",
         else => null,
     };
-    if (failed) |why| log.line("slide: the learned neurons could not be saved into the model's files: {s}", .{why});
+    if (failed) |why| log.line("slide: the learned neurons could not be saved into the model's files: {s}", .{why}) else log.line("slide: the learned neurons are saved into the model's files ({d:.1} s)", .{seconds(srv, began)});
     srv.slide.saveEnded(folder(srv), seconds(srv, began), failed);
 }
 

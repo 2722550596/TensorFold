@@ -494,12 +494,24 @@ pub fn Pocket(comptime T: type) type {
                 defer xs.deinit(p.gpa);
                 var kinds: std.ArrayList(Kind) = .empty;
                 defer kinds.deinit(p.gpa);
+                // its own rows, then every other prompt's row it fires on, read as they were (the step leaves their
+                // span be): the answers it gives there are its fact's too, as worded where it was not trained
                 for (0..e.count) |r| {
                     try xs.append(p.gpa, p.pos.items[(e.start + r) * d ..][0..d]);
                     try kinds.append(p.gpa, .fact);
                 }
+                var fixed = e.count;
                 for (p.labels.items, 0..) |l, i| {
-                    try xs.append(p.gpa, p.rows.items[(i * n + e.slot) * d ..][0..d]);
+                    const row = p.rows.items[(i * n + e.slot) * d ..][0..d];
+                    if (l.kind == .fact or l.kind == .held or dotBf16(u, row) <= 0) continue;
+                    try xs.append(p.gpa, row);
+                    try kinds.append(p.gpa, .other);
+                    fixed += 1;
+                }
+                for (p.labels.items, 0..) |l, i| {
+                    const row = p.rows.items[(i * n + e.slot) * d ..][0..d];
+                    if (l.kind != .fact and l.kind != .held and dotBf16(u, row) > 0) continue;
+                    try xs.append(p.gpa, row);
                     try kinds.append(p.gpa, switch (l.kind) {
                         .fact, .held => .steady, // this fact's questions are another fact's to it
                         .none => .other,
@@ -509,7 +521,7 @@ pub fn Pocket(comptime T: type) type {
                 const was = try p.gpa.dupe(f32, u);
                 defer p.gpa.free(was);
                 const before = try fit(p.gpa, xs.items, kinds.items, d, was, true, 0, 0);
-                const f = try fit(p.gpa, xs.items, kinds.items, d, u, true, fit_steps / 2, e.count);
+                const f = try fit(p.gpa, xs.items, kinds.items, d, u, true, fit_steps / 2, fixed);
                 if (!refitHolds(before, f)) {
                     // a refit that forgets its fact or spreads is undone; this fact's outputs are fitted with it firing
                     @memcpy(u, p.refit_up.items[p.refit_up.items.len - d ..]);

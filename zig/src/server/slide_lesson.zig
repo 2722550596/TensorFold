@@ -191,7 +191,7 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, null, q));
         try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, prompts.systems[i % prompts.systems.len], q));
     }
-    if (about == .self) try leaveEarlier(srv, cx, &parts, told[0], earlier, &checks, gone);
+    if (about == .self) try leaveEarlier(srv, cx, &parts, told[0], earlier, end, &keep, &checks, gone);
     // the near misses set aside, never trained on, check that the fact stays put
     try checks.appendSlice(a, parts.aside.items);
     log.line("slide: {d} near misses trained on, {d} set aside to check", .{ parts.near.items.len, parts.aside.items.len });
@@ -219,9 +219,10 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
 
 /// The model's own facts learned before, each by its first question, asked after each round: it must still bring that
 /// fact back, else the lesson took it and is rerouted from it as from a question about the user (never a question the
-/// new fact answers too). Only a question taken is fitted away from: every earlier fact's as router negatives and
-/// kept answers up front narrowed the router until the new fact's own unseen wordings failed (11.12).
-fn leaveEarlier(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, earlier: []const Fact, checks: *std.ArrayList(Check), gone: anytype) !void {
+/// new fact answers too). Its answer as it stands is kept too: the rows an earlier neuron fitted again is to read as it
+/// did, which its own trained rows alone missed ("你英文名叫什么？" fell to "我的英文名是Elias。" each lesson, 11.15).
+/// Every earlier fact's questions as router negatives narrowed the router until its own unseen wordings failed (11.12).
+fn leaveEarlier(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, earlier: []const Fact, end: []const u32, keep: *std.ArrayList(api.Example), checks: *std.ArrayList(Check), gone: anytype) !void {
     const a = cx.a;
     var asking: std.ArrayList(side.Asking) = .empty;
     var mine: std.ArrayList(Fact) = .empty;
@@ -244,6 +245,7 @@ fn leaveEarlier(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, earlier:
             continue;
         }
         try checks.append(a, .{ .question = q, .before = reply.content, .keeps = e.text });
+        try keep.append(a, try example(srv, cx, a, null, q, reply.content, ending(reply, end)));
         checked += 1;
     }
     log.line("slide: {d} facts of its own learned before, {d} of them checked after each round", .{ mine.items.len, checked });

@@ -78,11 +78,6 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     const given = if (body.field("facts")) |f| f.items() orelse return refuse(conn, a, 400, bad_facts) else null;
     if (given) |xs| for (xs) |x| if (!found.shaped(x)) return refuse(conn, a, 400, bad_facts);
     const text = if (given != null) "" else body.strField("text") orelse return refuse(conn, a, 400, "text is required");
-    // "others": questions about the model's other facts, which no lesson of its own here may take (self only)
-    const bad_others = "others must be a list of strings";
-    const others_in = if (body.field("others")) |o| o.items() orelse return refuse(conn, a, 400, bad_others) else &.{};
-    const others = a.alloc([]const u8, others_in.len) catch return;
-    for (others_in, others) |x, *q| q.* = std.mem.trim(u8, x.str() orelse return refuse(conn, a, 400, bad_others), " \t\r\n");
     const source = body.strField("source") orelse "chat";
     // "self": the text is the model's own, told in the first person, and teaches it who it is
     const about_field = if (body.field("about") == null) "user" else body.strField("about") orelse "";
@@ -130,7 +125,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
             missed(srv, &out, id, words(&cx, e));
             continue;
         };
-        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, about, facts, &.{t.wordings}, earlier, others, gone) catch |e| {
+        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, about, facts, &.{t.wordings}, earlier, gone) catch |e| {
             missed(srv, &out, id, words(&cx, e));
             putBack(srv, a, gave, id);
             continue;

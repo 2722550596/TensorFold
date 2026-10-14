@@ -13,6 +13,7 @@ const adapters = @import("adapters.zig");
 const backend = @import("backend.zig");
 const lesson_route = @import("lesson_route.zig");
 const prefix = @import("train_prefix.zig");
+const pocket_gate = @import("pocket_gate.zig");
 const Count = @import("pocket_clock.zig").Count;
 
 const Metal = backend.Metal;
@@ -52,6 +53,7 @@ pub const Trainer = struct {
     weights: Buffer, // f32 [pack_rows]: each answer row's share of its answer, 1 / its tokens
     ans: Buffer, // bf16 [pack_rows, D]: the final-normed answer rows, the head's input
     scale: Buffer, // f32 [pack_rows]: each row's scale on the open fact's pocket neurons
+    gate: Buffer, // i32 [pack_rows]: each row's fact gate on the open fact's pocket neurons (pocket_gate.trainRow)
     dhn: Buffer, // bf16 [pack_rows, D]
     head_t: Buffer, // bf16 [D, V]: the LM head transposed, for the loss's backward product
     head: [3]At,
@@ -60,8 +62,8 @@ pub const Trainer = struct {
     sketched: usize = 0, // rows sketched since the sketches were cleared, each row's place in them
     proj: Buffer, // f32 [layers, max_rows, candidates]: each row along each layer's candidate directions
     nudge: Nudge = .{}, // where a one-sequence target step adds `delta`
-    delta: Buffer, // f32 [max_seqs, 3, layers, D]: each sequence's nudges after each layer it names, a row each
-    push: Buffer, // f32 [max_seqs, 3, layers, D]: the loss's gradient at each nudged row after each of them
+    delta: Buffer, // f32 [max_seqs, keys, layers, D]: each sequence's nudges after each layer it names, a row each
+    push: Buffer, // f32 [max_seqs, keys, layers, D]: the loss's gradient at each nudged row after each of them
     inputs: Buffer, // bf16 [layers, pack_rows, D]: each MoE layer's normed input, as the last keys or target pass read it
     from: [cfg.max_layers]u32 = @splat(std.math.maxInt(u32)), // each layer's open pocket neurons, from here on
     spans: [max_seqs]Span = undefined, // where the last pass's sequences sat
@@ -104,9 +106,9 @@ pub const Trainer = struct {
         errdefer inline for (.{ "xb", "wt", "acc", "tiles" }) |f| @field(t.tmp, f).deinit();
         const d = c.hidden;
         const R = pack_rows;
-        const vecs = max_seqs * 3 * c.layers * d * 4;
-        const sizes = [_]usize{ (c.layers + 1) * R * d * 2, R * c.vocab * 2, R * 8, R * 4, R * 4, R * d * 2, R * 4, R * d * 2, d * c.vocab * 2, c.layers * max_rows * adapters.candidates * 4, vecs, vecs, c.layers * R * d * 2 };
-        const fields = [_]*Buffer{ &t.saved, &t.logits, &t.stats, &t.targets, &t.weights, &t.ans, &t.scale, &t.dhn, &t.head_t, &t.proj, &t.delta, &t.push, &t.inputs };
+        const vecs = max_seqs * train_mode.keys * c.layers * d * 4;
+        const sizes = [_]usize{ (c.layers + 1) * R * d * 2, R * c.vocab * 2, R * 8, R * 4, R * 4, R * d * 2, R * 4, R * 4, R * d * 2, d * c.vocab * 2, c.layers * max_rows * adapters.candidates * 4, vecs, vecs, c.layers * R * d * 2 };
+        const fields = [_]*Buffer{ &t.saved, &t.logits, &t.stats, &t.targets, &t.weights, &t.ans, &t.scale, &t.gate, &t.dhn, &t.head_t, &t.proj, &t.delta, &t.push, &t.inputs };
         var made: usize = 0;
         errdefer for (fields[0..made]) |buf| buf.deinit();
         for (fields, sizes) |buf, n| {
@@ -149,7 +151,7 @@ pub const Trainer = struct {
         t.sites.deinit();
         t.bufs.deinit();
         inline for (.{ "xb", "wt", "acc", "tiles" }) |f| @field(t.tmp, f).deinit();
-        inline for (.{ "saved", "acts", "logits", "stats", "targets", "weights", "ans", "scale", "dhn", "head_t", "proj", "delta", "push", "inputs" }) |f| @field(t, f).deinit();
+        inline for (.{ "saved", "acts", "logits", "stats", "targets", "weights", "ans", "scale", "gate", "dhn", "head_t", "proj", "delta", "push", "inputs" }) |f| @field(t, f).deinit();
         t.b.pool.give(t.fresh);
         t.cache.deinit(&t.b.pool);
         gpa.destroy(t);
@@ -158,7 +160,7 @@ pub const Trainer = struct {
     /// The mean loss of `ids`' answer from `start`, and what `mode` adds to it; `turn`: which rows carry which lessons.
     pub fn step(t: *Trainer, ids: []const u32, start: usize, mode: Mode, turn: lesson_route.Turn) !Result {
         var out: [1]Result = undefined;
-        try t.pass(&.{.{ .ids = ids, .start = start, .decide = turn.decide, .nudge = t.nudge }}, mode, turn, &out);
+        try t.pass(&.{.{ .ids = ids, .start = start, .decide = turn.decide, .fact = turn.fact, .nudge = t.nudge }}, mode, turn, &out);
         return out[0];
     }
 
@@ -193,9 +195,12 @@ pub const Trainer = struct {
         const targets = t.targets.slice(u32, t.answered);
         const weights = t.weights.slice(f32, t.answered);
         const scale = t.scale.slice(f32, rows);
+        const gate = t.gate.slice(i32, rows);
         for (seqs, t.spans[0..seqs.len], t.answers[0..seqs.len]) |sq, sp, a| {
             @memcpy(prompt[sp.at..][0..sp.rows], sq.ids[sq.skip..][0..sp.rows]);
             @memset(scale[sp.at..][0..sp.rows], sq.scale);
+            const decide = sp.row(sq.decide);
+            for (sp.at..sp.at + sp.rows) |r| gate[r] = pocket_gate.trainRow(r, decide, sq.fact);
             const share = 1 / @as(f32, @floatFromInt(a.rows));
             for (0..a.rows) |r| {
                 targets[a.at + r] = sq.ids[sq.start + r];
@@ -271,13 +276,13 @@ pub const Trainer = struct {
     /// The loss's gradient sequence s's target pass read at its key i's row after layer l.
     pub fn pushAt(t: *const Trainer, s: usize, i: usize, l: usize) []const f32 {
         const c = t.b.m.config;
-        return t.push.slice(f32, max_seqs * 3 * c.layers * c.hidden)[job.vec(c, s, i, l)..][0..c.hidden];
+        return t.push.slice(f32, max_seqs * train_mode.keys * c.layers * c.hidden)[job.vec(c, s, i, l)..][0..c.hidden];
     }
 
     /// Sequence s's nudge for key i after layer l, which its target pass adds at that key's row.
     pub fn deltaAt(t: *const Trainer, s: usize, i: usize, l: usize) []f32 {
         const c = t.b.m.config;
-        return t.delta.slice(f32, max_seqs * 3 * c.layers * c.hidden)[job.vec(c, s, i, l)..][0..c.hidden];
+        return t.delta.slice(f32, max_seqs * train_mode.keys * c.layers * c.hidden)[job.vec(c, s, i, l)..][0..c.hidden];
     }
 
     /// Each row along layer l's candidate directions ([rows, candidates]), as the last project step left them.

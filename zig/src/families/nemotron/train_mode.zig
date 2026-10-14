@@ -11,14 +11,16 @@ pub fn reads(mode: Mode) bool {
     };
 }
 
-/// Where a `target` step nudges and reads the gradient: three rows, each after its mask's layers, row i's in third i.
-pub const Nudge = struct { layers: [3]u64 = @splat(0), rows: [3]usize = @splat(0) };
+/// Where a `target` step nudges and reads the gradient: up to four keys (pocket.Key's backing ints), each row after its
+/// mask's layers; key i's row is `rows[i]`.
+pub const Nudge = struct { layers: [keys]u64 = @splat(0), rows: [keys]usize = @splat(0) };
+pub const keys = 4;
 
 /// The answer's mean loss, and whether each of its tokens was the likeliest at its row.
 pub const Result = struct { loss: f32, recalled: bool };
 
 /// A pass's sequence: tokens, answer start, decision row, pocket scale, nudges, and `skip` rows from prefix `slot`.
-pub const Seq = struct { ids: []const u32, start: usize, decide: usize, scale: f32 = 1, nudge: Nudge = .{}, skip: usize = 0, slot: u32 = 0 };
+pub const Seq = struct { ids: []const u32, start: usize, decide: usize, fact: i32, scale: f32 = 1, nudge: Nudge = .{}, skip: usize = 0, slot: u32 = 0 };
 
 /// Where each sequence of a pass sits: its first row, its rows (ids less the last and the skipped), its prefix.
 pub const Span = struct {

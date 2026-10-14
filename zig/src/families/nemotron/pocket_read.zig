@@ -69,7 +69,7 @@ pub fn once(p: anytype, t: anytype) !bool {
     var n: usize = 0;
     while (n < per_pass) : (n += 1) {
         const got = p.pickRead(p.at + n) orelse break;
-        seqs[n] = pack.seq(got.ex);
+        seqs[n] = pack.seq(got.ex, p.readFact(p.at + n));
         kinds[n] = got.kind;
     }
     if (n == 0) {
@@ -100,13 +100,21 @@ fn label(p: anytype, t: anytype, ex: Example, kind: Kind, which: u32, base: usiz
     }
     // its value row: the fact's own where the value comes, another answer's (an earlier fact's) one to stay silent on
     const value = if (p.split[2] > 0) valueRow(ex) else null;
-    try keep(p, t, base + ex.decide, .{ .kind = kind, .key = .reply, .ex = which, .row = @intCast(ex.decide) });
+    // the decision row: the fact's own questions and held answers, every other prompt's a steady no
+    try keep(p, t, base + ex.decide, .{ .kind = kind, .key = .detect, .ex = which, .row = @intCast(ex.decide) });
+    // the row after the decision: the first token of the fact's own answer; the rows after it are other to lead neurons
+    const lead_row = ex.decide + 1;
+    if (own and lead_row < ex.ids.len - 1) try keep(p, t, base + lead_row, .{ .kind = kind, .key = .lead, .ex = which, .row = @intCast(lead_row) });
     if (subject) |r| try keep(p, t, base + r, .{ .kind = kind, .key = .subject, .ex = which, .row = @intCast(r) });
     if (value) |r| try keep(p, t, base + r, if (own) .{ .kind = kind, .key = .value, .ex = which, .row = @intCast(r) } else .{ .kind = .other, .key = null, .ex = which, .row = @intCast(r) });
     // rows to stay silent on: every row of the fact's own examples, every third of others', each naming the subject
     var r: usize = 0;
     while (r < ex.ids.len - 1) : (r += 1) {
         if (r == ex.decide or (subject != null and r == subject.?) or (value != null and r == value.?)) continue;
+        if (own and r > ex.decide) {
+            if (r > lead_row) try keep(p, t, base + r, .{ .kind = .other, .key = .lead, .ex = which, .row = @intCast(r) });
+            if (value != null) try keep(p, t, base + r, .{ .kind = .other, .key = .value, .ex = which, .row = @intCast(r) });
+        }
         const named = p.split[1] > 0 and std.mem.indexOfScalar(u32, p.subjects.items, ex.ids[r]) != null;
         if (named and (own or !p.strict or (!p.silencing and r > 0 and std.mem.indexOfScalar(u32, p.leads.items, ex.ids[r - 1]) != null))) {
             // the fact's own subject (in its examples, or after the token its questions put first): left free

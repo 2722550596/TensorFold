@@ -63,7 +63,7 @@ pub fn use(t: anytype, s: *Prefixes, seqs: []Seq, which: []const usize) !void {
         if (k.slot == null and k.seen and k.skip >= least and s.slots < @TypeOf(t.prefixes).most) {
             k.slot = s.slots;
             s.slots += 1;
-            fresh[n] = .{ .ids = q.ids[0 .. k.skip + 1], .start = k.skip, .decide = k.skip - 1, .slot = k.slot.? };
+            fresh[n] = .{ .ids = q.ids[0 .. k.skip + 1], .start = k.skip, .decide = k.skip - 1, .fact = q.fact, .slot = k.slot.? };
             n += 1;
         }
         if (k.slot) |slot| {

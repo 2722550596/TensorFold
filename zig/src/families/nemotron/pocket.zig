@@ -12,6 +12,7 @@ const reading = @import("pocket_read.zig");
 const Example = examples.Example;
 const Acting = lesson_route.Acting;
 const Kind = pocket_fit.Kind;
+const gate = @import("pocket_gate.zig");
 const Fit = pocket_fit.Fit;
 const fit = pocket_fit.fit;
 const fitLayer = pocket_fit.fitLayer;
@@ -22,12 +23,25 @@ const fit_steps = pocket_fit.fit_steps;
 /// A pocket's neurons at each MoE layer: one 4-bit group of the shared expert's width.
 pub const neurons = 64;
 const per_fact = 10; // neurons a fact takes, at the layers that tell its questions apart best
-const value_neurons = 4; // of those, the ones before its answer's value, when its answers show one
+const detect_neurons = 4; // of a fact's neurons, the ones that score its questions' decision rows: they never output
+const value_neurons = 3; // of those, the ones before its answer's value, when its answers show one (then lead keeps 3; else lead 6)
 const kept_least: f32 = 0.5; // an earlier neuron refitted must still reach this (or what it reached before) on its own fact's rows
 const refit_above: f32 = 0.5; // an earlier neuron is refitted only where it fires above this on a new fact's rows
 
-/// Where a neuron fires: the reply's first row, the named subject's last token, or the row before the answer's value.
-pub const Key = enum(u2) { reply, subject, value };
+/// Where a neuron fires: its question's decision row (detect), the named subject's last token, the row before the answer's value, or the row after the decision (lead).
+pub const Key = enum(u2) { detect, subject, value, lead };
+const nkeys = @typeInfo(Key).@"enum".field_names.len;
+
+/// The gate role a key's neurons play within their fact (subject's are free).
+fn role(key: Key) ?gate.Role {
+    return switch (key) {
+        .detect => .detect,
+        .lead => .lead,
+        .value => .value,
+        .subject => null,
+    };
+}
+
 
 /// Keying: auto gives the subject the share of questions naming it (if half or more), the rest to the reply.
 pub const Mode = enum { auto, reply, subject, both }; // both: half at the subject, half at the reply (relation-aware)
@@ -39,13 +53,13 @@ const Taken = struct { slot: usize, neuron: usize, key: Key };
 pub const Placed = struct { layer: usize, neuron: usize, key: Key };
 
 /// A neuron a fact took, the rows it was fitted to fire on (in `pos`), and its fact's subject token (keyed on it).
-const Learned = struct { slot: usize, neuron: usize, key: Key, start: usize, count: usize, subject: u32, lesson: u32 };
+const Learned = struct { slot: usize, neuron: usize, key: Key, start: usize, count: usize, subject: u32, lesson: u32, fact: u8 };
 
 /// A read row: what it is to the open fact, whose key row it is (null: neither), its example and its place there.
 pub const Label = struct { kind: Kind, key: ?Key, ex: u32, row: u32 };
 
 /// Another prompt's answer a subject neuron of the open fact fires on (most at `row`): it is to stay as it was.
-const Keep = struct { ex: Example, row: usize };
+const Keep = struct { ex: Example, row: usize, fact: i32 };
 
 /// An earlier neuron the open fact fitted again; its input weights from before are kept for an undo.
 const Refit = struct { slot: usize, neuron: usize };
@@ -66,9 +80,11 @@ pub fn valueRow(ex: Example) ?usize {
     return if (ex.value > 0 and ex.value + 1 >= ex.start and ex.value + 1 < ex.ids.len) ex.value else null;
 }
 
-/// What read row `l` is to neurons keyed `key`: their own key rows as read, every other row one they stay silent on.
+/// What read row `l` is to neurons keyed `key`: their own key rows as read. A gated key (detect, lead, value) is silent on
+/// the rest by its gate, so those rows are unconstrained; the free subject key stays silent on every other row.
 fn kindFor(l: Label, key: Key) Kind {
     if (l.key == key) return l.kind;
+    if (key != .subject) return .none;
     return if (l.kind == .steady) .steady else .other;
 }
 
@@ -117,7 +133,7 @@ fn normBf16(row: []const u16) f32 {
 
 test "a row the new fact shares is not held fixed" {
     const one: u16 = 0x3f80;
-    const labels = [_]Label{ .{ .ex = 0, .row = 0, .kind = .fact, .key = .reply }, .{ .ex = 1, .row = 0, .kind = .none, .key = .reply } };
+    const labels = [_]Label{ .{ .ex = 0, .row = 0, .kind = .fact, .key = .detect }, .{ .ex = 1, .row = 0, .kind = .none, .key = .detect } };
     const rows = [_]u16{ one, 0, 0, one };
     try std.testing.expect(sharedRow(&labels, &rows, 1, 0, 2, &.{ one, 0 }));
     try std.testing.expect(!sharedRow(&labels, &rows, 1, 0, 2, &.{ 0, one }));
@@ -140,8 +156,9 @@ pub fn Pocket(comptime T: type) type {
         joint: std.ArrayList(Taken) = .empty, // those facts' neurons, their outputs fitted with the open fact's
         joint_down: std.ArrayList(f32) = .empty, // [joint, D]: their outputs before, put back by an undo
         joint_answers: std.ArrayList(Example) = .empty, // their replayed answers, fitted on as the open fact's own are
+        joint_facts: std.ArrayList(?u8) = .empty, // the fact each joint answer's lesson holds (null: none of this session's), parallel to joint_answers
         replay_lessons: []const u32 = &.{}, // the lesson each answer of steady[2] (the replay) came from
-        split: [3]usize = .{ per_fact, 0, 0 }, // the open fact's neurons on each key
+        split: [nkeys]usize = .{ detect_neurons, 0, 0, per_fact - detect_neurons }, // the open fact's neurons on each key
         subjects: std.ArrayList(u32) = .empty, // the open fact's subject tokens
         leads: std.ArrayList(u32) = .empty, // the tokens before them: after another, the subject is someone else's
         moe: std.ArrayList(usize) = .empty, // the MoE layers a pocket sits at, its slots in order
@@ -163,6 +180,9 @@ pub fn Pocket(comptime T: type) type {
         retired_marks: usize = 0, // retired_lessons before the last retire, which a put-back returns to
         retired: std.ArrayList([2]usize) = .empty, // the last retire's (slot, neuron), put back if the newer fact fails
         retired_w: std.ArrayList(f32) = .empty, // [retired, 2, D]: their input and output weights from before
+        gates: std.ArrayList(i32) = .empty, // [slots, neurons]: each neuron's gate mark (free: not gated)
+        retired_g: std.ArrayList(i32) = .empty, // [retired]: their gate marks before the last retire
+        fact: u8 = 0, // the open fact's id, which its neurons' marks name
         phase: enum { read, fit, values, check, done } = .done,
         at: usize = 0, // the next example read, answer of a step, or held-out answer judged
         back: usize = 0, // held-out answers that came back token for token
@@ -180,35 +200,33 @@ pub fn Pocket(comptime T: type) type {
         }
 
         pub fn deinit(p: *Self) void {
-            inline for (.{ "moe", "up", "down", "used", "taken", "rows", "labels", "keeps", "refits", "refit_up", "retired_lessons", "retired", "retired_w", "joint", "joint_down", "joint_answers", "learned", "pos", "subjects", "leads" }) |f| @field(p, f).deinit(p.gpa);
+            inline for (.{ "moe", "up", "down", "used", "gates", "taken", "rows", "labels", "keeps", "refits", "refit_up", "retired_lessons", "retired", "retired_w", "retired_g", "joint", "joint_down", "joint_answers", "joint_facts", "learned", "pos", "subjects", "leads" }) |f| @field(p, f).deinit(p.gpa);
             p.read.deinit(p.gpa);
             p.v.deinit(p.gpa);
         }
 
-        /// The fact's neurons per key: as asked, or by how many answers show a value and questions name the subject.
-        fn pickSplit(p: *const Self, lists: []const []const Example, answered: []const Example) [3]usize {
+        /// The fact's neurons per key (indexed by `Key`): detect fixed, the value share when answers show one, and the rest
+        /// as lead, of which the subject takes its share by how many questions name it (as asked, by the mode).
+        fn pickSplit(p: *const Self, lists: []const []const Example, answered: []const Example) [nkeys]usize {
             var valued: usize = 0;
             for (answered) |ex| valued += @intFromBool(valueRow(ex) != null);
             const on_value: usize = if (p.mode == .auto and (p.valuing or p.valued) and valued > 0 and 2 * valued >= answered.len) value_neurons else 0;
-            const rest = per_fact - on_value;
+            const lead = per_fact - detect_neurons - on_value;
             var asked: usize = 0;
             var named: usize = 0;
             for (lists) |xs| for (xs) |ex| {
                 asked += 1;
                 named += @intFromBool(subjectRow(ex) != null);
             };
-            if (named == 0 or p.mode == .reply) return .{ rest, 0, on_value };
-            if (p.mode == .subject) return .{ 0, rest, on_value };
-            if (p.mode == .both) return .{ rest / 2, rest - rest / 2, on_value };
-            if (2 * named < asked) return .{ rest, 0, on_value };
-            const on = (rest * named + asked / 2) / asked;
-            return .{ rest - on, on, on_value };
+            const subject: usize = if (named == 0 or p.mode == .reply or asked == 0) 0 else if (p.mode == .subject) lead else if (p.mode == .both) lead / 2 else if (2 * named < asked) 0 else (lead * named + asked / 2) / asked;
+            return .{ detect_neurons, subject, on_value, lead - subject };
         }
 
         /// The row of `ex` that the neurons keyed `key` fire at (null: it names no subject).
         pub fn keyRow(_: *const Self, ex: Example, key: Key) ?usize {
             return switch (key) {
-                .reply => ex.decide,
+                .detect => ex.decide,
+                .lead => if (ex.decide + 1 < ex.ids.len - 1) ex.decide + 1 else null,
                 .subject => subjectRow(ex),
                 .value => valueRow(ex),
             };
@@ -216,8 +234,42 @@ pub fn Pocket(comptime T: type) type {
 
         /// Whether the fact's neurons fire on `ex`: at its reply, its subject if named, or before its value if said.
         pub fn fires(p: *const Self, ex: Example) bool {
-            return p.split[0] > 0 or (p.split[1] > 0 and subjectRow(ex) != null) or (p.split[2] > 0 and valueRow(ex) != null);
+            return p.split[0] > 0 or (p.split[1] > 0 and subjectRow(ex) != null) or (p.split[2] > 0 and valueRow(ex) != null) or (p.split[3] > 0 and ex.decide + 1 < ex.ids.len - 1);
         }
+
+        fn markOf(p: *const Self, key: Key) i32 {
+            return if (role(key)) |r| gate.mark(p.fact, r) else gate.free;
+        }
+
+        /// The next fact id: one past the largest any learned neuron carries (error.TooManyFacts past the 256 the marks hold).
+        fn allocFact(p: *const Self) !u8 {
+            var fresh: usize = 0;
+            for (p.learned.items) |e| fresh = @max(fresh, @as(usize, e.fact) + 1);
+            if (fresh >= gate.max_facts) return error.TooManyFacts;
+            return @intCast(fresh);
+        }
+        /// The fact an earlier lesson's neurons carry, if any of this session's.
+        pub fn factOfLesson(p: *const Self, lesson: u32) ?u8 {
+            for (p.learned.items) |e| if (e.lesson == lesson) return e.fact;
+            return null;
+        }
+        /// The fact a read example's answer belongs to, as its Seq names it: the open fact's own answers (its id), a replayed
+        /// earlier answer (its lesson's fact), anything else free (-1).
+        pub fn readFact(p: *const Self, which: usize) i32 {
+            const own = p.answered.len + p.prompts.len + p.held.len;
+            if (which < own) return @intCast(p.fact);
+            var at = own;
+            for (p.steady, 0..) |xs, s| {
+                if (which < at + xs.len) {
+                    if (s != 2 or which - at >= p.replay_lessons.len) return -1;
+                    return if (p.factOfLesson(p.replay_lessons[which - at])) |f| @as(i32, f) else -1;
+                }
+                at += xs.len;
+            }
+            return -1;
+        }
+
+
 
         fn slots(p: *const Self) usize {
             return p.moe.items.len;
@@ -237,7 +289,8 @@ pub fn Pocket(comptime T: type) type {
             try p.up.appendNTimes(p.gpa, 0, p.slots() * n);
             try p.down.appendNTimes(p.gpa, 0, p.slots() * n);
             try p.used.appendNTimes(p.gpa, 0, p.slots());
-            for (p.moe.items, 0..) |l, j| p.used.items[j] = host.pocketRead(l, p.up.items[j * n ..][0..n], p.down.items[j * n ..][0..n]);
+            try p.gates.appendNTimes(p.gpa, gate.free, p.slots() * neurons);
+            for (p.moe.items, 0..) |l, j| p.used.items[j] = host.pocketRead(l, p.up.items[j * n ..][0..n], p.down.items[j * n ..][0..n], p.gates.items[j * neurons ..][0..neurons]);
         }
 
         /// A replaced fact's neurons, (layer, neuron) each, zeroed where they sit; their places stay taken.
@@ -246,16 +299,19 @@ pub fn Pocket(comptime T: type) type {
             const d = t.config().hidden;
             p.retired.clearRetainingCapacity();
             p.retired_w.clearRetainingCapacity();
+            p.retired_g.clearRetainingCapacity();
             p.retired_marks = p.retired_lessons.items.len;
             for (gone) |g| {
                 const slot = std.mem.indexOfScalar(usize, p.moe.items, g[0]) orelse continue;
                 if (g[1] >= p.used.items[slot]) continue;
                 for (p.learned.items) |e| if (e.slot == slot and e.neuron == g[1] and std.mem.indexOfScalar(u32, p.retired_lessons.items, e.lesson) == null) try p.retired_lessons.append(p.gpa, e.lesson);
                 try p.retired.append(p.gpa, .{ slot, g[1] });
+                try p.retired_g.append(p.gpa, p.gates.items[slot * neurons + g[1]]);
                 try p.retired_w.appendSlice(p.gpa, p.neuron(p.up.items, slot, g[1], d));
                 try p.retired_w.appendSlice(p.gpa, p.neuron(p.down.items, slot, g[1], d));
                 @memset(p.neuron(p.up.items, slot, g[1], d), 0);
                 @memset(p.neuron(p.down.items, slot, g[1], d), 0);
+                p.gates.items[slot * neurons + g[1]] = gate.free;
                 try p.upload(t, host, slot);
             }
             std.log.info("slide pocket: {d} neurons of replaced facts zeroed", .{gone.len});
@@ -268,23 +324,26 @@ pub fn Pocket(comptime T: type) type {
             for (p.retired.items, 0..) |r, i| {
                 @memcpy(p.neuron(p.up.items, r[0], r[1], d), p.retired_w.items[2 * i * d ..][0..d]);
                 @memcpy(p.neuron(p.down.items, r[0], r[1], d), p.retired_w.items[(2 * i + 1) * d ..][0..d]);
+                p.gates.items[r[0] * neurons + r[1]] = p.retired_g.items[i];
                 try p.upload(t, host, r[0]);
             }
             std.log.info("slide pocket: {d} neurons of replaced facts put back", .{p.retired.items.len});
             p.retired_lessons.shrinkRetainingCapacity(p.retired_marks);
             p.retired.clearRetainingCapacity();
             p.retired_w.clearRetainingCapacity();
+            p.retired_g.clearRetainingCapacity();
         }
 
         /// A fact's lesson begun: its answers, more wordings, held-out answers and prompts its neurons stay silent on.
         pub fn begin(p: *Self, t: *T, host: anytype, answered: []const Example, prompts: []const Example, held: []const Example, steady: []const []const Example) !void {
             try p.load(t, host);
             p.answered = answered;
+            p.fact = try p.allocFact();
             p.prompts = prompts;
             p.held = held;
             p.steady = steady;
             p.split = p.pickSplit(&.{ answered, prompts }, answered);
-            std.log.info("slide pocket: the fact's neurons: {d} at the reply's first row, {d} at its questions' subject, {d} before its answer's value", .{ p.split[0], p.split[1], p.split[2] });
+            std.log.info("slide pocket: the fact's neurons: {d} detect at the decision row, {d} at its questions' subject, {d} before its answer's value, {d} lead after the decision", .{ p.split[0], p.split[1], p.split[2], p.split[3] });
             p.taken.clearRetainingCapacity();
             p.keeps.clearRetainingCapacity();
             const kept = try reading.again(p);
@@ -351,6 +410,7 @@ pub fn Pocket(comptime T: type) type {
                 const k = p.taken.items[i];
                 @memset(p.neuron(p.up.items, k.slot, k.neuron, d), 0);
                 @memset(p.neuron(p.down.items, k.slot, k.neuron, d), 0);
+                p.gates.items[k.slot * neurons + k.neuron] = gate.free;
                 if (k.neuron + 1 == p.used.items[k.slot]) p.used.items[k.slot] -= 1;
                 try p.upload(t, host, k.slot);
             }
@@ -366,7 +426,7 @@ pub fn Pocket(comptime T: type) type {
 
         pub fn upload(p: *Self, t: *T, host: anytype, slot: usize) !void {
             const n = neurons * t.config().hidden;
-            try host.pocket(p.moe.items[slot], p.up.items[slot * n ..][0..n], p.down.items[slot * n ..][0..n], p.used.items[slot]);
+            try host.pocket(p.moe.items[slot], p.up.items[slot * n ..][0..n], p.down.items[slot * n ..][0..n], p.gates.items[slot * neurons ..][0..neurons], p.used.items[slot]);
         }
 
         /// Example i and its kind: the fact's answers, then its other wordings, held-out answers and the other prompts.
@@ -400,29 +460,29 @@ pub fn Pocket(comptime T: type) type {
             const n = p.slots();
             const m = p.labels.items.len;
             if (std.c.getenv("TF_SLIDE_POCKET_DUMP")) |dir| pocket_dump.write(p, std.mem.span(dir), p.learned_before, d) catch |e| std.log.warn("slide pocket: the read rows were not written: {t}", .{e});
-            const kinds = try p.gpa.alloc(Kind, 3 * m);
+            const kinds = try p.gpa.alloc(Kind, nkeys * m);
             defer p.gpa.free(kinds);
-            for (p.labels.items, 0..) |l, i| for (0..3) |k| {
+            for (p.labels.items, 0..) |l, i| for (0..nkeys) |k| {
                 kinds[k * m + i] = kindFor(l, @fromBackingInt(@intCast(k)));
             };
-            const us = try p.gpa.alloc(f32, 3 * n * d);
+            const us = try p.gpa.alloc(f32, nkeys * n * d);
             defer p.gpa.free(us);
-            const fits = try p.gpa.alloc(Fit, 3 * n);
+            const fits = try p.gpa.alloc(Fit, nkeys * n);
             defer p.gpa.free(fits);
             @memset(fits, .{ .fires = std.math.maxInt(usize) });
             const t0 = clock.now(host.io);
-            var threads: [3 * 64]?std.Thread = @splat(null);
+            var threads: [nkeys * 64]?std.Thread = @splat(null);
             var fitted: usize = 0;
-            for (0..3) |k| for (p.moe.items, 0..) |l, j| if (p.split[k] > 0 and candidate(l, c.layers, @fromBackingInt(@intCast(k)))) {
+            for (0..nkeys) |k| for (p.moe.items, 0..) |l, j| if (p.split[k] > 0 and candidate(l, c.layers, @fromBackingInt(@intCast(k)))) {
                 threads[k * n + j] = std.Thread.spawn(.{}, fitLayer, .{ p.gpa, p.rows.items, kinds[k * m ..][0..m], n, j, d, us[(k * n + j) * d ..][0..d], &fits[k * n + j] }) catch null;
                 fitted += 1;
             };
-            for (0..3) |k| for (p.moe.items, 0..) |l, j| if (p.split[k] > 0 and candidate(l, c.layers, @fromBackingInt(@intCast(k)))) {
+            for (0..nkeys) |k| for (p.moe.items, 0..) |l, j| if (p.split[k] > 0 and candidate(l, c.layers, @fromBackingInt(@intCast(k)))) {
                 if (threads[k * n + j]) |th| th.join() else fitLayer(p.gpa, p.rows.items, kinds[k * m ..][0..m], n, j, d, us[(k * n + j) * d ..][0..d], &fits[k * n + j]);
             };
             const t1 = clock.now(host.io);
             p.logEarlier(d);
-            for (0..3) |k| if (p.split[k] > 0) {
+            for (0..nkeys) |k| if (p.split[k] > 0) {
                 const key: Key = @fromBackingInt(@intCast(k));
                 var order: std.ArrayList(usize) = .empty;
                 defer order.deinit(p.gpa);
@@ -463,6 +523,12 @@ pub fn Pocket(comptime T: type) type {
             }
         }
 
+        /// Whether neuron `k` at slot `j` is a detect neuron of a fact this session learned (only those are refitted or counted).
+        fn isDetect(p: *const Self, j: usize, k: usize) bool {
+            for (p.learned.items) |e| if (e.slot == j and e.neuron == k) return e.key == .detect;
+            return false;
+        }
+
         /// How the neurons in place before this lesson fire on its rows, as relu² sums a row: on its questions' key
         /// rows, on the rest of its own examples' rows (its answers), and on other prompts' rows; the most a neuron.
         fn logEarlier(p: *const Self, d: usize) void {
@@ -473,17 +539,17 @@ pub fn Pocket(comptime T: type) type {
             var firing: [3]usize = @splat(0);
             var top: [3]f32 = @splat(0);
             var top_at: [3][2]usize = @splat(.{ 0, 0 });
-            for (0..n) |j| for (0..p.used.items[j]) |k| {
+            for (0..n) |j| for (0..p.used.items[j]) |k| if (p.isDetect(j, k)) {
                 const u = p.neuron(@constCast(p.up.items), j, k, d);
                 var most: [3]f32 = @splat(0);
-                for (p.labels.items, 0..) |l, i| {
+                for (p.labels.items, 0..) |l, i| if (l.key == .detect) {
                     const s: usize = if (l.kind == .fact or l.kind == .held) 0 else if (l.ex < own) 1 else 2;
                     const z = dotBf16(u, p.rows.items[(i * n + j) * d ..][0..d]);
                     if (z > 0) {
                         sum[s] += z * z;
                         most[s] = @max(most[s], z);
                     }
-                }
+                };
                 for (0..3) |s| if (most[s] > 0) {
                     firing[s] += 1;
                     if (most[s] > top[s]) {
@@ -492,7 +558,9 @@ pub fn Pocket(comptime T: type) type {
                     }
                 };
             };
-            for (p.labels.items) |l| rows[if (l.kind == .fact or l.kind == .held) 0 else if (l.ex < own) 1 else 2] += 1;
+            for (p.labels.items) |l| if (l.key == .detect) {
+                rows[if (l.kind == .fact or l.kind == .held) 0 else if (l.ex < own) 1 else 2] += 1;
+            };
             const names = [_][]const u8{ "its questions' key rows", "its answers' other rows", "other prompts' rows" };
             for (0..3) |s| std.log.info("slide pocket: earlier neurons on {s} ({d}): {d} fire, relu² {d:.3} a row, most {d:.2} (layer {d}, neuron {d})", .{ names[s], rows[s], firing[s], sum[s] / @as(f32, @floatFromInt(@max(rows[s], 1))), top[s], top_at[s][0], top_at[s][1] });
         }
@@ -505,11 +573,12 @@ pub fn Pocket(comptime T: type) type {
             try p.taken.append(p.gpa, .{ .slot = j, .neuron = k, .key = key });
             @memcpy(p.neuron(p.up.items, j, k, d), u);
             @memset(p.neuron(p.down.items, j, k, d), 0);
+            p.gates.items[j * neurons + k] = p.markOf(key);
             std.log.info("slide pocket: layer {d}, neuron {d}, at the {s}: on for {d:.0}% of the fact's questions (least {d:.2}), held-out {d:.0}% (mean {d:.2}); other prompts at most {d:.2}, other rows {d:.2}, {d} above zero", .{ p.moe.items[j], k, @tagName(key), 100 * f.fact_on, f.fact_least, 100 * f.held_on, f.held_mean, f.steady_most, f.other_most, f.fires });
             const start = p.pos.items.len / d;
             for (kinds, 0..) |kind, i| if (kind == .fact) try p.pos.appendSlice(p.gpa, p.rows.items[(i * n + j) * d ..][0..d]);
             const subject: u32 = if (key == .subject and p.subjects.items.len > 0) p.subjects.items[0] else 0;
-            try p.learned.append(p.gpa, .{ .slot = j, .neuron = k, .key = key, .start = start, .count = p.pos.items.len / d - start, .subject = subject, .lesson = p.lesson });
+            try p.learned.append(p.gpa, .{ .slot = j, .neuron = k, .key = key, .start = start, .count = p.pos.items.len / d - start, .subject = subject, .lesson = p.lesson, .fact = p.fact });
         }
 
         /// Other answers where the fact's subject neurons fire, each at its strongest row: these stay as they were.
@@ -537,7 +606,7 @@ pub fn Pocket(comptime T: type) type {
                 }
                 const row = at orelse continue;
                 const ex = p.pickRead(which).?.ex;
-                if (ex.ids.len > ex.start + 1) try p.keeps.append(p.gpa, .{ .ex = ex, .row = row });
+                if (ex.ids.len > ex.start + 1) try p.keeps.append(p.gpa, .{ .ex = ex, .row = row, .fact = p.readFact(which) });
             }
             std.log.info("slide pocket: {d} other answers name the fact's subject where its neurons fire; they are to stay as they were", .{p.keeps.items.len});
         }
@@ -548,12 +617,14 @@ pub fn Pocket(comptime T: type) type {
             const n = p.slots();
             const own = p.answered.len + p.prompts.len + p.held.len;
             for (p.learned.items[0..p.learned_before]) |e| {
+                if (e.key == .lead or e.key == .value) continue; // never refitted: only a detect neuron reads its question's decision row
                 if (e.key == .subject and std.mem.indexOfScalar(u32, p.subjects.items, e.subject) != null) continue;
+                const det = e.key == .detect;
                 const u = p.neuron(p.up.items, e.slot, e.neuron, d);
                 // on this fact's questions, or anywhere in its answers, where an earlier fact's words spill into them
                 // ("冬天握着我的手，会有一种温暖的、像棉绒般的乳酸乳感" of the pet name's neurons, core8e)
                 var most: f32 = -std.math.inf(f32);
-                for (p.labels.items, 0..) |l, i| if (l.kind == .fact or l.kind == .held or l.ex < own) {
+                for (p.labels.items, 0..) |l, i| if ((!det or l.key == .detect) and (l.kind == .fact or l.kind == .held or (!det and l.ex < own))) {
                     most = @max(most, dotBf16(u, p.rows.items[(i * n + e.slot) * d ..][0..d]));
                 };
                 if (most <= refit_above) continue; // weak there: left exactly as it is, this fact's outputs fitted with it
@@ -573,7 +644,7 @@ pub fn Pocket(comptime T: type) type {
                 var fixed = e.count;
                 for (p.labels.items, 0..) |l, i| {
                     const row = p.rows.items[(i * n + e.slot) * d ..][0..d];
-                    if (l.kind == .fact or l.kind == .held or l.ex < own or dotBf16(u, row) <= 0) continue;
+                    if ((det and l.key != .detect) or l.kind == .fact or l.kind == .held or l.ex < own or dotBf16(u, row) <= 0) continue;
                     // a row the new fact's questions share (the chat template's own tokens) is left free, else the
                     // fixed span holds it firing there (core8d: 771 of 826 refits put back, its "E" in their answers)
                     if (sharedRow(p.labels.items, p.rows.items, n, e.slot, d, row)) continue;
@@ -583,7 +654,7 @@ pub fn Pocket(comptime T: type) type {
                 }
                 for (p.labels.items, 0..) |l, i| {
                     const row = p.rows.items[(i * n + e.slot) * d ..][0..d];
-                    if (l.kind != .fact and l.kind != .held and l.ex >= own and dotBf16(u, row) > 0) continue;
+                    if ((det and l.key != .detect) or (l.kind != .fact and l.kind != .held and l.ex >= own and dotBf16(u, row) > 0)) continue;
                     try xs.append(p.gpa, row);
                     try kinds.append(p.gpa, switch (l.kind) {
                         .fact, .held => .steady, // this fact's questions are another fact's to it
@@ -616,7 +687,7 @@ pub fn Pocket(comptime T: type) type {
 
         /// Learned neurons into the shards, then into the forward as the shards hold them (4-bit); the bytes written.
         pub fn save(p: *Self, t: *T, host: anytype) !usize {
-            const bytes = try host.pocketSave(p.moe.items, neurons, p.up.items, p.down.items);
+            const bytes = try host.pocketSave(p.moe.items, neurons, p.up.items, p.down.items, p.gates.items);
             for (0..p.slots()) |j| if (p.used.items[j] > 0) try p.upload(t, host, j);
             return bytes;
         }
@@ -662,33 +733,41 @@ test "a fact keys as many neurons on its subject as the share of its questions t
     const ids = [_]u32{ 1, 2, 7, 3, 4, 5 };
     const named: Example = .{ .ids = &ids, .start = 4, .decide = 3, .subject = 2 };
     const plain: Example = .{ .ids = &ids, .start = 4, .decide = 3 };
-    try std.testing.expectEqual([3]usize{ 5, 5, 0 }, p.pickSplit(&.{ &.{ named, plain }, &.{} }, &.{}));
-    try std.testing.expectEqual([3]usize{ 0, 10, 0 }, p.pickSplit(&.{ &.{ named, named }, &.{named} }, &.{}));
-    try std.testing.expectEqual([3]usize{ 3, 7, 0 }, p.pickSplit(&.{&.{ named, named, plain }}, &.{}));
-    try std.testing.expectEqual([3]usize{ 10, 0, 0 }, p.pickSplit(&.{&.{ named, plain, plain }}, &.{}));
-    try std.testing.expectEqual([3]usize{ 10, 0, 0 }, p.pickSplit(&.{&.{}}, &.{}));
-    // answers whose value comes after row 4: none there unless asked (by the lesson or the variable), then four
+    // [detect, subject, value, lead]: detect fixed at four; the rest is lead, the subject taking its share from it
+    try std.testing.expectEqual([nkeys]usize{ 4, 3, 0, 3 }, p.pickSplit(&.{ &.{ named, plain }, &.{} }, &.{}));
+    try std.testing.expectEqual([nkeys]usize{ 4, 6, 0, 0 }, p.pickSplit(&.{ &.{ named, named }, &.{named} }, &.{}));
+    try std.testing.expectEqual([nkeys]usize{ 4, 4, 0, 2 }, p.pickSplit(&.{&.{ named, named, plain }}, &.{}));
+    try std.testing.expectEqual([nkeys]usize{ 4, 0, 0, 6 }, p.pickSplit(&.{&.{ named, plain, plain }}, &.{}));
+    try std.testing.expectEqual([nkeys]usize{ 4, 0, 0, 6 }, p.pickSplit(&.{&.{}}, &.{}));
+    // answers whose value comes after row 4: none there unless asked (by the lesson or the variable), then three
     const valued: Example = .{ .ids = &ids, .start = 4, .decide = 3, .subject = 2, .value = 4 };
-    try std.testing.expectEqual([3]usize{ 0, 10, 0 }, p.pickSplit(&.{&.{ valued, valued }}, &.{ valued, valued }));
+    try std.testing.expectEqual([nkeys]usize{ 4, 6, 0, 0 }, p.pickSplit(&.{&.{ valued, valued }}, &.{ valued, valued }));
     p.valued = true;
-    try std.testing.expectEqual([3]usize{ 0, 6, 4 }, p.pickSplit(&.{&.{ valued, valued }}, &.{ valued, valued }));
+    try std.testing.expectEqual([nkeys]usize{ 4, 3, 3, 0 }, p.pickSplit(&.{&.{ valued, valued }}, &.{ valued, valued }));
     p.valued = false;
     p.valuing = true;
-    try std.testing.expectEqual([3]usize{ 0, 6, 4 }, p.pickSplit(&.{&.{ valued, valued }}, &.{ valued, valued }));
+    try std.testing.expectEqual([nkeys]usize{ 4, 3, 3, 0 }, p.pickSplit(&.{&.{ valued, valued }}, &.{ valued, valued }));
     p.mode = .subject;
-    try std.testing.expectEqual([3]usize{ 0, 10, 0 }, p.pickSplit(&.{&.{ named, plain, plain }}, &.{}));
+    try std.testing.expectEqual([nkeys]usize{ 4, 6, 0, 0 }, p.pickSplit(&.{&.{ named, plain, plain }}, &.{}));
     p.mode = .reply;
-    try std.testing.expectEqual([3]usize{ 10, 0, 0 }, p.pickSplit(&.{&.{ named, named }}, &.{}));
+    try std.testing.expectEqual([nkeys]usize{ 4, 0, 0, 6 }, p.pickSplit(&.{&.{ named, named }}, &.{}));
 }
 
-test "a read row is a fact's row only to its own key's neurons; another prompt's mention of the subject is left free" {
+test "a read row is a gated key's kind only on its own key's row; the free subject key stays silent on other rows" {
+    // detect, lead and value neurons are silent on every other key's row by their gate: those rows are unconstrained
     try std.testing.expectEqual(Kind.fact, kindFor(.{ .kind = .fact, .key = .subject, .ex = 0, .row = 2 }, .subject));
-    try std.testing.expectEqual(Kind.other, kindFor(.{ .kind = .fact, .key = .subject, .ex = 0, .row = 2 }, .reply));
-    try std.testing.expectEqual(Kind.held, kindFor(.{ .kind = .held, .key = .reply, .ex = 3, .row = 7 }, .reply));
-    try std.testing.expectEqual(Kind.steady, kindFor(.{ .kind = .steady, .key = .reply, .ex = 1, .row = 9 }, .subject));
+    try std.testing.expectEqual(Kind.none, kindFor(.{ .kind = .fact, .key = .subject, .ex = 0, .row = 2 }, .detect));
+    try std.testing.expectEqual(Kind.held, kindFor(.{ .kind = .held, .key = .detect, .ex = 3, .row = 7 }, .detect));
+    try std.testing.expectEqual(Kind.steady, kindFor(.{ .kind = .steady, .key = .detect, .ex = 1, .row = 9 }, .detect));
+    try std.testing.expectEqual(Kind.none, kindFor(.{ .kind = .steady, .key = .detect, .ex = 1, .row = 9 }, .lead));
+    try std.testing.expectEqual(Kind.fact, kindFor(.{ .kind = .fact, .key = .lead, .ex = 0, .row = 4 }, .lead));
+    try std.testing.expectEqual(Kind.other, kindFor(.{ .kind = .other, .key = .lead, .ex = 0, .row = 5 }, .lead));
+    try std.testing.expectEqual(Kind.none, kindFor(.{ .kind = .other, .key = .lead, .ex = 0, .row = 5 }, .value));
+    try std.testing.expectEqual(Kind.fact, kindFor(.{ .kind = .fact, .key = .value, .ex = 0, .row = 6 }, .value));
+    // the subject key is free: another key's rows are silent for it (other, or steady where steady)
     try std.testing.expectEqual(Kind.none, kindFor(.{ .kind = .none, .key = .subject, .ex = 1, .row = 4 }, .subject));
-    try std.testing.expectEqual(Kind.other, kindFor(.{ .kind = .none, .key = .subject, .ex = 1, .row = 4 }, .reply));
     try std.testing.expectEqual(Kind.other, kindFor(.{ .kind = .other, .key = null, .ex = 1, .row = 5 }, .subject));
+    try std.testing.expectEqual(Kind.steady, kindFor(.{ .kind = .steady, .key = null, .ex = 1, .row = 5 }, .subject));
 }
 
 test "an earlier neuron fitted silent on a new fact's question keeps the least it had on its own rows, under kept_least" {

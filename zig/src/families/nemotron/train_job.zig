@@ -25,13 +25,15 @@ const reads = train_mode.reads;
 
 /// Where sequence s's vector for key i after layer l sits in `delta` and `push`, in floats.
 pub fn vec(c: cfg.Config, s: usize, i: usize, l: usize) usize {
-    return ((s * 3 + i) * c.layers + l) * c.hidden;
+    return ((s * train_mode.keys + i) * c.layers + l) * c.hidden;
 }
 
 /// The lowest layer any sequence's nudge names (layers when none does).
 fn lowest(c: cfg.Config, seqs: []const Seq) usize {
     var mask: u64 = 0;
-    for (seqs) |sq| mask |= sq.nudge.layers[0] | sq.nudge.layers[1] | sq.nudge.layers[2];
+    for (seqs) |sq| {
+        for (sq.nudge.layers) |bits| mask = mask | bits;
+    }
     return if (mask == 0) c.layers else @ctz(mask);
 }
 
@@ -54,7 +56,7 @@ pub const Job = struct {
         f.route = j.route;
         const x = w.context(e, f, &t.cache, rows, t.fresh);
         const o: ops.Ops = .{ .k = &m.kernels, .pk = &m.prefill, .e = e, .tmp = &t.tmp, .route = &j.route };
-        const scale: tf.Scale = .{ .rows = t.scale, .from = &t.from };
+        const scale: tf.Scale = .{ .rows = t.scale, .gate = t.gate, .from = &t.from };
         const low = if (j.mode == .target) lowest(c, j.seqs) else 0;
         const one = j.seqs[0];
         w.embed(x, b.prompt, 0);

@@ -5,6 +5,8 @@ const ckpt = @import("../../core/checkpoint_metal.zig");
 const row = @import("../../core/row_projection.zig");
 const host4 = @import("../../core/affine4_host.zig");
 const cfg = @import("config.zig");
+const pocket_gate = @import("pocket_gate.zig");
+const lesson_route = @import("lesson_route.zig");
 
 const Tensor = ckpt.Tensor;
 
@@ -41,9 +43,20 @@ pub const Mamba = struct {
 pub const Pocket = struct {
     up: mtl.Buffer, // f32 [neurons, D]: each neuron's input weights
     down: mtl.Buffer, // f32 [neurons, D]: each neuron's output
+    gates: mtl.Buffer, // i32 [neurons]: each neuron's gate mark (pocket_gate.zig), free unless a fact gates it
     z: mtl.Buffer, // f32 [rows, neurons]: the forward's scratch
     zn: mtl.Buffer, // f32 [rows]: the input kernel's row lengths, unread
     used: usize, // neurons in use, the first ones
+};
+
+/// The fact gates' state shared by every layer's pocket (design §11.18): decision scores, latches, row gates.
+pub const Gate = struct {
+    score: mtl.Buffer, // f32 [lesson_route.max_slots, pocket_gate.max_facts]: each stream's detect scores at its decision row
+    latch: mtl.Buffer, // i32 [lesson_route.max_slots]: the fact each stream latched, -1 none
+    detects: mtl.Buffer, // f32 [pocket_gate.max_facts]: detect neurons per fact over all layers (the means' divisors)
+    rows: mtl.Buffer, // i32 [rows]: a pass's row gates (inference: filled by the GPU; training: by the host)
+    thresholds: pocket_gate.Latch, // need and margin of the latch (TF_SLIDE_POCKET_LATCH)
+    gated: bool = false, // some neuron carries a fact's mark: a decision row is worth setting
 };
 
 pub const Moe = struct {
@@ -94,6 +107,7 @@ pub const Weights = struct {
     norm_f: Tensor,
     head: Linear,
     mtp: ?Mtp = null,
+    gate: ?Gate = null, // the fact gates' shared buffers, with the first pocket
     owned: std.ArrayList(mtl.Buffer) = .empty,
     linears: std.StringHashMapUnmanaged(Linear) = .empty, // by the Python module path ("fused.qkv.5" for q/k/v)
     allocator: std.mem.Allocator,
@@ -106,6 +120,24 @@ pub const Weights = struct {
         self.linears.deinit(self.allocator);
     }
 };
+
+/// Recounts the gate state from every layer's pocket (design §11.18): each fact's detect neurons (the scores' divisors) and
+/// whether any neuron carries a mark. Call after a pocket's gates change.
+pub fn refreshGate(w: *Weights, layers: usize) void {
+    const g = if (w.gate) |*x| x else return;
+    const counts = g.detects.slice(f32, pocket_gate.max_facts);
+    @memset(counts, 0);
+    var gated = false;
+    for (w.layers[0..layers]) |lay| switch (lay) {
+        .moe => |mo| if (mo.pocket) |p| for (p.gates.slice(i32, p.used)) |mark| {
+            if (mark < 0) continue;
+            gated = true;
+            if (pocket_gate.roleOf(mark) == .detect) counts[pocket_gate.factOf(mark).?] += 1;
+        },
+        else => {},
+    };
+    g.gated = gated;
+}
 
 const Builder = struct {
     allocator: std.mem.Allocator,
@@ -238,7 +270,10 @@ const Builder = struct {
         const c = self.c;
         const d = c.hidden;
         const n = c.pocket;
-        const p: Pocket = .{ .up = try self.buffer(n * d * 4), .down = try self.buffer(n * d * 4), .z = try self.buffer(pocket_rows * n * 4), .zn = try self.buffer(pocket_rows * 4), .used = 0 };
+        const gates = try self.buffer(n * 4);
+        @memset(gates.slice(i32, n), pocket_gate.free);
+        _ = try makeGate(self.w, self.device, pocket_rows);
+        const p: Pocket = .{ .up = try self.buffer(n * d * 4), .down = try self.buffer(n * d * 4), .gates = gates, .z = try self.buffer(pocket_rows * n * 4), .zn = try self.buffer(pocket_rows * 4), .used = 0 };
         const ups = p.up.slice(f32, n * d);
         const ug = d / kernel_group;
         const uw = up[0].host(u32);
@@ -392,6 +427,27 @@ fn firstRows(t: [3]Tensor, n: usize) [3]Tensor {
 
 /// Rows the pocket's forward scratch holds: the largest prefill step and then some.
 pub const pocket_rows = 8192 + 256;
+
+/// The fact gates' shared buffers, made with the first pocket (`rows` a pass holds); the same ones after.
+pub fn makeGate(w: *Weights, device: mtl.Device, rows: usize) !Gate {
+    if (w.gate) |g| return g;
+    const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+    try w.owned.ensureUnusedCapacity(w.allocator, 4);
+    var made: [4]mtl.Buffer = undefined;
+    for (&made, [_]usize{ lesson_route.max_slots * pocket_gate.max_facts * 4, lesson_route.max_slots * 4, pocket_gate.max_facts * 4, rows * 4 }, 0..) |*buf, bytes, i| {
+        buf.* = device.buffer(bytes, opts) catch |e| {
+            for (made[0..i]) |x| x.deinit();
+            return e;
+        };
+    }
+    for (made) |x| w.owned.appendAssumeCapacity(x);
+    const g: Gate = .{ .score = made[0], .latch = made[1], .detects = made[2], .rows = made[3], .thresholds = pocket_gate.latchFromEnv() };
+    @memset(g.score.slice(f32, lesson_route.max_slots * pocket_gate.max_facts), 0);
+    @memset(g.latch.slice(i32, lesson_route.max_slots), pocket_gate.free);
+    @memset(g.detects.slice(f32, pocket_gate.max_facts), 0);
+    w.gate = g;
+    return g;
+}
 
 /// One source linear's rows written into the tiled destination: words [n][g][8] -> [n/64][g][n%64][8].
 const Tile = struct {

@@ -105,7 +105,7 @@ pub fn Probe(comptime T: type) type {
                 const ex = list[p.at];
                 p.at += 1;
                 const r = row(s, ex) orelse continue;
-                t.nudge = .{ .layers = .{ s.layers, 0, 0 }, .rows = .{ r, 0, 0 } };
+                t.nudge = .{ .layers = .{ s.layers, 0, 0, 0 }, .rows = .{ r, 0, 0, 0 } };
                 @memcpy(t.delta.slice(f32, n), vecs);
                 const got = try t.step(ex.ids, ex.start, .target, .{ .decide = ex.decide, .bits = acting, .whole = true });
                 p.loss += got.loss;

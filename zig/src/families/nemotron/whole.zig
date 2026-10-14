@@ -35,16 +35,16 @@ pub fn Hooks(comptime H: type) type {
             return H.fold4.addRounded(f.gpa, words, scales, biases, rows, cols, delta, h, add);
         }
 
-        pub fn pocket(f: Self, layer: usize, up: []const f32, down: []const f32, used: usize) !void {
-            return H.pocket(f.b, layer, up, down, used);
+        pub fn pocket(f: Self, layer: usize, up: []const f32, down: []const f32, gates: []const i32, used: usize) !void {
+            return H.pocket(f.b, layer, up, down, gates, used);
         }
 
-        pub fn pocketRead(f: Self, layer: usize, up: []f32, down: []f32) usize {
-            return H.pocketRead(f.b, layer, up, down);
+        pub fn pocketRead(f: Self, layer: usize, up: []f32, down: []f32, gates: []i32) usize {
+            return H.pocketRead(f.b, layer, up, down, gates);
         }
 
-        pub fn pocketSave(f: Self, layers: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
-            return H.pocketSave(f.b, f.gpa, f.io, layers, neurons, up, down);
+        pub fn pocketSave(f: Self, layers: []const usize, neurons: usize, up: []f32, down: []f32, gates: []const i32) !usize {
+            return H.pocketSave(f.b, f.gpa, f.io, layers, neurons, up, down, gates);
         }
     };
 }

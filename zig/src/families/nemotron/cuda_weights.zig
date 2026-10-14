@@ -10,6 +10,8 @@ const draft_ids = @import("draft_ids.zig");
 const Source = @import("cuda_source.zig").Source;
 const host4 = core.affine4_host;
 const modelopt = @import("cuda_modelopt.zig");
+const pocket_gate = @import("pocket_gate.zig");
+const lesson_route = @import("lesson_route.zig");
 
 pub const QLinear = kern.QLinear;
 pub const Experts = kern.Experts;
@@ -25,8 +27,9 @@ pub const Adapter = struct { a: u64, b: u64, tau: u64, xa: u64, xn: u64, gates: 
 /// A `*_rest` is a lesson's change past its projection's 4-bit codes ([out, in] bf16), added after it; 0 when none.
 pub const Mamba = struct { in_proj: QLinear, out_proj: QLinear, conv_w: u64, conv_b: u64, a: u64, d: u64, dt_bias: u64, gnorm: u64, out_rest: u64 = 0, adapter: ?Adapter = null };
 pub const Attention = struct { qkv: QLinear, o: QLinear, o_rest: u64 = 0, adapter: ?Adapter = null };
-/// The pocket kernel's neurons (config's pocket): input weights and outputs, [n, D] fp32 each, from the 4-bit codes.
-pub const Pocket = struct { up: u64, down: u64, n: usize };
+/// The pocket kernel's neurons (config's pocket): input weights and outputs, [n, D] fp32 each, from the 4-bit codes; `gates`
+/// their fact gate marks (i32 [n], pocket_gate.zig: free until a fact sets them).
+pub const Pocket = struct { up: u64, down: u64, gates: u64, n: usize, used: usize };
 /// The shared expert's down projection rest in two halves (experts E and E + 1); its learned change reads both.
 pub const MoE = struct { router: u64, bias: u64, experts: Experts, rest: [2]u64 = .{ 0, 0 }, adapter: ?Adapter = null, pocket: ?Pocket = null };
 pub const Block = struct { kind: Kind, norm: u64, mamba: Mamba = undefined, attn: Attention = undefined, moe: MoE = undefined };
@@ -42,6 +45,15 @@ pub fn affine(q: QLinear) !kern.Affine4 {
 
 /// A loaded tensor by the Python engine's dotted name, for digests against its weights.
 pub const Named = struct { name: []u8, ptr: u64, len: usize };
+/// The fact gates' device state (design §11.18): each stream's detect scores, latch and the detect counts the means divide by.
+pub const Gate = struct {
+    score: u64, // f32 [kern.max_slots, pocket_gate.max_facts]
+    latch: u64, // i32 [lesson_route.max_slots]: the fact each stream latched, -1 none
+    detects: u64, // f32 [pocket_gate.max_facts]: detect neurons per fact over all layers
+    need: f32,
+    margin: f32,
+    gated: bool = false, // some neuron carries a fact's mark: a decision row is worth setting
+};
 
 pub const Weights = struct {
     gpa: std.mem.Allocator,
@@ -55,6 +67,7 @@ pub const Weights = struct {
     draft_ids: u64 = 0,
     draft_count: usize = 0,
     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
+    gate: ?Gate = null, // the fact gates' shared state, made with the first pocket (cuda_slide.zig)
     named: std.ArrayList(Named) = .empty,
 
     pub fn deinit(w: *Weights) void {
@@ -274,7 +287,7 @@ pub const Loader = struct {
         const values = try L.gpa.alloc(f32, n * d);
         defer L.gpa.free(values);
         var buf: [128]u8 = undefined;
-        var out: Pocket = .{ .up = 0, .down = 0, .n = n };
+        var out: Pocket = .{ .up = 0, .down = 0, .gates = 0, .n = n, .used = 0 };
         // up: rows own..own + n, each d inputs (d / 8 words, d / 64 scales and biases)
         const up = try three(ck, pre, "shared_experts.up_proj");
         var part: [3][]align(4) u8 = @splat(&.{});
@@ -287,6 +300,11 @@ pub const Loader = struct {
         host4.dequantize(std.mem.bytesAsSlice(u32, part[0]), std.mem.bytesAsSlice(u16, part[1]), std.mem.bytesAsSlice(u16, part[2]), values);
         out.up = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.pocket_up", .{name}), n * d * 4);
         try L.ops.upload(out.up, std.mem.sliceAsBytes(values));
+        const free_marks = try L.gpa.alloc(i32, n);
+        defer L.gpa.free(free_marks);
+        @memset(free_marks, pocket_gate.free);
+        out.gates = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.pocket_gates", .{name}), n * 4);
+        try L.ops.upload(out.gates, std.mem.sliceAsBytes(free_marks));
         try L.ops.s.synchronize();
         // down: d rows, each own + n inputs; the last n of each row (its last n / 64 groups), stored neuron by neuron
         const down = try three(ck, pre, "shared_experts.down_proj");
@@ -308,7 +326,29 @@ pub const Loader = struct {
         out.down = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.pocket_down", .{name}), n * d * 4);
         try L.ops.upload(out.down, std.mem.sliceAsBytes(values));
         try L.ops.s.synchronize();
+        if (L.w.gate == null) L.w.gate = try L.gate();
         return out;
+    }
+
+    /// The fact gates' device state (design §11.18): scores zeroed, latches and marks free, the detect counts zero, the
+    /// thresholds from TF_SLIDE_POCKET_LATCH.
+    fn gate(L: *Loader) !Gate {
+        const slots = lesson_route.max_slots;
+        const score = try L.alloc("fact_gate.score", slots * pocket_gate.max_facts * 4);
+        const latch = try L.alloc("fact_gate.latch", slots * 4);
+        const detects = try L.alloc("fact_gate.detects", pocket_gate.max_facts * 4);
+        const zeros = try L.gpa.alloc(f32, @max(slots * pocket_gate.max_facts, pocket_gate.max_facts));
+        defer L.gpa.free(zeros);
+        @memset(zeros, 0);
+        const free_latch = try L.gpa.alloc(i32, slots);
+        defer L.gpa.free(free_latch);
+        @memset(free_latch, pocket_gate.free);
+        try L.ops.upload(score, std.mem.sliceAsBytes(zeros[0 .. slots * pocket_gate.max_facts]));
+        try L.ops.upload(latch, std.mem.sliceAsBytes(free_latch));
+        try L.ops.upload(detects, std.mem.sliceAsBytes(zeros[0..pocket_gate.max_facts]));
+        try L.ops.s.synchronize();
+        const th = pocket_gate.latchFromEnv();
+        return .{ .score = score, .latch = latch, .detects = detects, .need = th.need, .margin = th.margin };
     }
 
     /// One expert matrix (n outputs of k inputs) with the shared halves appended; `split` halves the shared columns.

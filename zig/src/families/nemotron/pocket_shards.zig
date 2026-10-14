@@ -1,6 +1,7 @@
 //! The pocket in the shards: every shared expert widened once (config.json told), later writes in place.
 const std = @import("std");
 const cfg = @import("config.zig");
+const pocket_gate = @import("pocket_gate.zig");
 
 const group = 64;
 
@@ -175,4 +176,76 @@ fn words(bytes: []const u8) []align(1) const u32 {
 
 fn halves(bytes: []const u8) []align(1) const u16 {
     return std.mem.bytesAsSlice(u16, bytes);
+}
+
+/// The gate marks of the pocket's neurons (design §11.18), beside the shards in the model's directory.
+pub const gates_file = "tensorfold_pocket_gates.json";
+
+/// Layer `layer`'s gate marks (`neurons` of them) into `out`: the file's, or all free when it has none for the layer.
+pub fn readGates(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, neurons: usize, layer: usize, out: []i32) !void {
+    std.debug.assert(out.len == neurons);
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var kept = try readAllGates(arena, io, dir, neurons);
+    @memset(out, pocket_gate.free);
+    if (kept.get(layer)) |row| @memcpy(out, row);
+}
+
+/// The gate marks of MoE layers `layers` (gates[j * neurons..] for layers[j]) into `dir`'s gates file, the file's other layers kept.
+/// Through a temporary file renamed into place.
+pub fn writeGates(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, neurons: usize, layers: []const usize, gates: []const i32) !void {
+    std.debug.assert(gates.len >= layers.len * neurons);
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var kept = try readAllGates(arena, io, dir, neurons);
+    for (layers, 0..) |l, j| try kept.put(arena, l, try arena.dupe(i32, gates[j * neurons ..][0..neurons]));
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try out.writer.print("{{\"neurons\":{d},\"layers\":{{", .{neurons});
+    var first = true;
+    var it = kept.iterator();
+    while (it.next()) |e| {
+        if (!first) try out.writer.writeAll(",");
+        first = false;
+        try out.writer.print("\"{d}\":[", .{e.key_ptr.*});
+        for (e.value_ptr.*, 0..) |g, i| {
+            if (i != 0) try out.writer.writeAll(",");
+            try out.writer.print("{d}", .{g});
+        }
+        try out.writer.writeAll("]");
+    }
+    try out.writer.writeAll("}}");
+    const path = try std.fs.path.join(arena, &.{ dir, gates_file });
+    const tmp = try std.fmt.allocPrint(arena, "{s}.tmp", .{path});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = out.written() });
+    try std.Io.Dir.renameAbsolute(tmp, path, io);
+}
+
+/// The file's layers of `neurons` marks each; none when the file is absent or of another pocket size.
+fn readAllGates(arena: std.mem.Allocator, io: std.Io, dir: []const u8, neurons: usize) !std.AutoArrayHashMapUnmanaged(usize, []i32) {
+    var kept: std.AutoArrayHashMapUnmanaged(usize, []i32) = .empty;
+    const path = try std.fs.path.join(arena, &.{ dir, gates_file });
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 24)) catch |e| switch (e) {
+        error.FileNotFound => return kept,
+        else => return e,
+    };
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{});
+    if (root != .object) return error.BadGates;
+    const size = root.object.get("neurons") orelse return error.BadGates;
+    if (size != .integer or size.integer != neurons) return kept;
+    const layers = root.object.get("layers") orelse return error.BadGates;
+    if (layers != .object) return error.BadGates;
+    var it = layers.object.iterator();
+    while (it.next()) |e| {
+        const l = try std.fmt.parseInt(usize, e.key_ptr.*, 10);
+        if (e.value_ptr.* != .array or e.value_ptr.array.items.len != neurons) return error.BadGates;
+        const row = try arena.alloc(i32, neurons);
+        for (e.value_ptr.array.items, row) |v, *g| {
+            if (v != .integer) return error.BadGates;
+            g.* = @intCast(v.integer);
+        }
+        try kept.put(arena, l, row);
+    }
+    return kept;
 }

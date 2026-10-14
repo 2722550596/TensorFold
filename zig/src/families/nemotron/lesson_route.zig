@@ -16,7 +16,7 @@ pub const off: Route = .{};
 pub const Acting = std.bit_set.Integer(max_blocks);
 
 /// A training example's decision row and the lessons acting after it (`whole`: on every row, as weight edits do).
-pub const Turn = struct { decide: u32, bits: Acting = .empty, whole: bool = false };
+pub const Turn = struct { decide: u32, bits: Acting = .empty, whole: bool = false, fact: i32 = -1 };
 
 /// A slot's latch flags (`latch`: u32 [max_slots, max_blocks]) set to `bits`, as a training pass reads them.
 pub fn flag(latch: []u32, slot: u32, bits: Acting) void {

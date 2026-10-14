@@ -6,6 +6,7 @@ const Fence = @import("../../core/fence.zig").Fence;
 const fwd = @import("forward.zig");
 const st = @import("state.zig");
 const lesson_route = @import("lesson_route.zig");
+const pocket_gate = @import("pocket_gate.zig");
 const layers = @import("layers.zig");
 const mtp = @import("mtp.zig");
 const timing = @import("timing.zig");
@@ -260,8 +261,9 @@ pub const Metal = struct {
         const c = try self.gpa.create(st.Cache);
         c.* = try st.Cache.init(self.m.device, self.m.config, rows_needed, self.head != null);
         c.rid = try self.pool.takeRid();
-        // a decision row only where lessons route on it: else the prompt's chunks stay as plain serving cuts them
-        c.decide = if (s.decide != null and layers.firstAdapter(&self.m.weights) != null) s.decide.? else lesson_route.none;
+        // a decision row only where lessons route on it, or a fact gate is set: else the prompt's chunks stay as plain serving cuts them
+        const gated = if (self.m.weights.gate) |g| g.gated else false;
+        c.decide = if (s.decide != null and (gated or layers.firstAdapter(&self.m.weights) != null)) s.decide.? else lesson_route.none;
         c.untaught = s.untaught;
         try self.caches.put(self.gpa, s, c);
         @memcpy(self.prompt.slice(u32, ids.len), ids);
@@ -331,17 +333,44 @@ pub const Metal = struct {
 
     /// Dev trace (TF_SLIDE_TRACE): the stream's router scores at its decision row and the lessons acting on its reply.
     fn traceLessons(self: *Metal, c: *const st.Cache) !void {
-        const ad = layers.firstAdapter(&self.m.weights) orelse return;
         try self.drain();
-        const n = lesson_route.max_blocks;
-        const at: usize = @intCast(@max(c.rid, 0));
-        const score = ad.score.slice(f32, lesson_route.max_slots * n)[at * n ..][0..n];
-        const flags = ad.latch.slice(u32, lesson_route.max_slots * n)[at * n ..][0..n];
-        const need = ad.need.slice(f32, n);
-        var line: [2048]u8 = undefined;
-        var w: std.Io.Writer = .fixed(&line);
-        for (0..ad.rank / 16) |b| w.print(" {d:.2}/{d:.2}{s}", .{ score[b], need[b], if (flags[b] != 0) "*" else "" }) catch break;
-        std.log.info("slide trace: decision row {d}: scores{s} (* acting)", .{ c.decide, w.buffered() });
+        if (layers.firstAdapter(&self.m.weights)) |ad| {
+            const n = lesson_route.max_blocks;
+            const at: usize = @intCast(@max(c.rid, 0));
+            const score = ad.score.slice(f32, lesson_route.max_slots * n)[at * n ..][0..n];
+            const flags = ad.latch.slice(u32, lesson_route.max_slots * n)[at * n ..][0..n];
+            const need = ad.need.slice(f32, n);
+            var line: [2048]u8 = undefined;
+            var w: std.Io.Writer = .fixed(&line);
+            for (0..ad.rank / 16) |b| w.print(" {d:.2}/{d:.2}{s}", .{ score[b], need[b], if (flags[b] != 0) "*" else "" }) catch break;
+            std.log.info("slide trace: decision row {d}: scores{s} (* acting)", .{ c.decide, w.buffered() });
+        }
+        if (self.m.weights.gate) |g| {
+            const at: usize = @intCast(@max(c.rid, 0));
+            const n = pocket_gate.max_facts;
+            const score = g.score.slice(f32, lesson_route.max_slots * n)[at * n ..][0..n];
+            const detects = g.detects.slice(f32, n);
+            var best: ?usize = null;
+            var second: ?usize = null;
+            var means: [pocket_gate.max_facts]f32 = undefined;
+            for (&means, score, detects, 0..) |*m, s, k, f| {
+                m.* = if (k > 0) s / k else 0;
+                if (k == 0) continue;
+                if (best == null or m.* > means[best.?]) {
+                    second = best;
+                    best = f;
+                } else if (second == null or m.* > means[second.?]) second = f;
+            }
+            const fact = g.latch.slice(i32, lesson_route.max_slots)[at];
+            const b: i64 = if (best) |x| @intCast(x) else -1;
+            const r: i64 = if (second) |x| @intCast(x) else -1;
+            const bm: f32 = if (best) |x| means[x] else 0;
+            const rm: f32 = if (second) |x| means[x] else 0;
+            if (fact >= 0)
+                std.log.info("slide pocket: latched fact {d} (mean {d:.2}), runner-up {d} (mean {d:.2})", .{ fact, bm, r, rm })
+            else
+                std.log.info("slide pocket: no fact (best {d} mean {d:.2}, runner-up {d} mean {d:.2})", .{ b, bm, r, rm });
+        }
     }
 
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {

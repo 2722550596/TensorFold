@@ -17,6 +17,7 @@ const lay = @import("cuda_train_layout.zig");
 const prefix = @import("cuda_train_prefix.zig");
 const Count = @import("pocket_clock.zig").Count;
 const Source = @import("cuda_source.zig").Source;
+const pocket_gate = @import("pocket_gate.zig");
 
 /// Rows a sequence learns from at most: a question and its answer (attention's backward reads at most 256).
 pub const max_rows = 256;
@@ -36,8 +37,8 @@ pub const Answer = train_mode.Answer;
 pub const Turn = lesson_route.Turn;
 const reads = train_mode.reads;
 
-/// Where the candidate projections start in the mapped host block (after targets, weights, stats and scales).
-const proj_at = pack_rows * 20;
+/// Where the candidate projections start in the mapped host block (after targets, weights, stats, scales and gate rows).
+const proj_at = pack_rows * 24;
 
 /// The trainer's own sequence: cache rows enough for a step, one attention chunk.
 const seq_len = state.chunk_keys;
@@ -131,8 +132,8 @@ pub const Trainer = struct {
     probs: u64 = 0,
     dscores: u64 = 0,
     nudge: train_mode.Nudge = .{}, // where a one-sequence target step adds `delta`
-    delta: Shared = undefined, // f32 [max_seqs, 3, layers, D]: each sequence's nudges after each layer it names
-    push: Shared = undefined, // f32 [max_seqs, 3, layers, D]: the loss's gradient at each nudged row after each of them
+    delta: Shared = undefined, // f32 [max_seqs, keys, layers, D]: each sequence's nudges after each layer it names
+    push: Shared = undefined, // f32 [max_seqs, keys, layers, D]: the loss's gradient at each nudged row after each of them
     inputs: Shared = undefined, // bf16 [layers, pack_rows, D]: each MoE layer's normed input, as a keys or target pass read it
     residuals: Shared = undefined, // bf16 [layers + 1, pack_rows, D]: the residuals a target pass saved, for the host
     sketched: usize = 0, // rows sketched since the sketches were cleared, each row's place in them
@@ -183,7 +184,7 @@ pub const Trainer = struct {
         t.c = c;
         t.raw = raw[0..c.layers];
         t.kept = kept[0..c.layers];
-        const mapped = proj_at + c.layers * max_rows * sites_mod.candidates * 4 + 2 * max_seqs * 3 * c.layers * c.hidden * 4 + (2 * c.layers + 1) * pack_rows * c.hidden * 2;
+        const mapped = proj_at + c.layers * max_rows * sites_mod.candidates * 4 + 2 * max_seqs * train_mode.keys * c.layers * c.hidden * 4 + (2 * c.layers + 1) * pack_rows * c.hidden * 2;
         const prefixes = prefix.max_slots * prefix.Store.init(undefined, c, max_rows).bytes();
         return copies + lay.layout(&t, true) + mapped + prefixes + state.Seq.bytes(c, seq_len, &.{}) + (1 << 30); // a GiB for the sites and the scratch
     }
@@ -209,9 +210,9 @@ pub const Trainer = struct {
         inline for (state.seq_fields, 0..) |name, i| @field(t.buf, name) = t.seq.ptr[i];
         t.host = try sites_mod.Mapped.init(d, proj_at + c.layers * max_rows * sites_mod.candidates * 4);
         errdefer t.host.deinit();
-        t.delta = .{ .m = try sites_mod.Mapped.init(d, max_seqs * 3 * c.layers * c.hidden * 4) };
+        t.delta = .{ .m = try sites_mod.Mapped.init(d, max_seqs * train_mode.keys * c.layers * c.hidden * 4) };
         errdefer t.delta.m.deinit();
-        t.push = .{ .m = try sites_mod.Mapped.init(d, max_seqs * 3 * c.layers * c.hidden * 4) };
+        t.push = .{ .m = try sites_mod.Mapped.init(d, max_seqs * train_mode.keys * c.layers * c.hidden * 4) };
         errdefer t.push.m.deinit();
         t.inputs = .{ .m = try sites_mod.Mapped.init(d, c.layers * pack_rows * c.hidden * 2) };
         errdefer t.inputs.m.deinit();
@@ -350,6 +351,11 @@ pub const Trainer = struct {
         return t.host.slice(f32, 5 * pack_rows)[4 * pack_rows ..];
     }
 
+    /// Each row's fact gate on the open fact's pocket neurons (pocket_gate.trainRow), i32 [pack_rows] after the scales.
+    fn gates(t: *const Trainer) []i32 {
+        return t.host.slice(i32, 6 * pack_rows)[5 * pack_rows ..];
+    }
+
     /// Layer i's output projection as loaded: the matrix its learned change sits after.
     pub fn outProj(t: *const Trainer, i: usize) Mat {
         return switch (t.raw[i]) {
@@ -385,17 +391,17 @@ pub const Trainer = struct {
 
     /// Where sequence s's vector for key i after layer l sits in `delta` and `push`, in floats.
     fn vec(t: *const Trainer, s: usize, i: usize, l: usize) usize {
-        return ((s * 3 + i) * t.c.layers + l) * t.c.hidden;
+        return ((s * train_mode.keys + i) * t.c.layers + l) * t.c.hidden;
     }
 
     /// The loss's gradient sequence s's target pass read at its key i's row after layer l.
     pub fn pushAt(t: *const Trainer, s: usize, i: usize, l: usize) []const f32 {
-        return t.push.slice(f32, max_seqs * 3 * t.c.layers * t.c.hidden)[t.vec(s, i, l)..][0..t.c.hidden];
+        return t.push.slice(f32, max_seqs * train_mode.keys * t.c.layers * t.c.hidden)[t.vec(s, i, l)..][0..t.c.hidden];
     }
 
     /// Sequence s's nudge for key i after layer l, which its target pass adds at that key's row.
     pub fn deltaAt(t: *const Trainer, s: usize, i: usize, l: usize) []f32 {
-        return t.delta.slice(f32, max_seqs * 3 * t.c.layers * t.c.hidden)[t.vec(s, i, l)..][0..t.c.hidden];
+        return t.delta.slice(f32, max_seqs * train_mode.keys * t.c.layers * t.c.hidden)[t.vec(s, i, l)..][0..t.c.hidden];
     }
 
     pub fn savedAt(t: *const Trainer, l: usize) u64 {
@@ -441,7 +447,7 @@ pub const Trainer = struct {
     /// The mean loss of `ids`' answer from `start`, and what `mode` adds to it; `turn`: which rows carry which lessons.
     pub fn step(t: *Trainer, ids: []const u32, start: usize, mode: Mode, turn: lesson_route.Turn) !Result {
         var out: [1]Result = undefined;
-        try t.pass(&.{.{ .ids = ids, .start = start, .decide = turn.decide, .nudge = t.nudge }}, mode, turn, &out);
+        try t.pass(&.{.{ .ids = ids, .start = start, .decide = turn.decide, .fact = turn.fact, .nudge = t.nudge }}, mode, turn, &out);
         return out[0];
     }
 
@@ -475,6 +481,7 @@ pub const Trainer = struct {
         for (seqs, spans, answers) |sq, sp, a| {
             @memcpy(ids[sp.at..][0..sp.rows], sq.ids[sq.skip..][0..sp.rows]);
             @memset(t.scales()[sp.at..][0..sp.rows], sq.scale);
+            for (sp.at..sp.at + sp.rows) |r| t.gates()[r] = pocket_gate.trainRow(r, sp.row(sq.decide), sq.fact);
             const share = 1 / @as(f32, @floatFromInt(a.rows));
             for (0..a.rows) |r| {
                 t.targets()[a.at + r] = sq.ids[sq.start + r];
@@ -490,11 +497,13 @@ pub const Trainer = struct {
         t.route = lesson_route.trained(rows, tt);
         var f = fwd.Forward.init(c, &e.w, b, o, seq_len, e.nch, false);
         f.route = t.route;
-        const scale: tfw.Scale = .{ .rows = t.host.dev + 4 * pack_rows * 4, .from = &t.from };
+        const scale: tfw.Scale = .{ .rows = t.host.dev + 4 * pack_rows * 4, .gate = t.host.dev + 5 * pack_rows * 4, .from = &t.from };
         var low: usize = 0;
         if (mode == .target) {
             var mask: u64 = 0;
-            for (seqs) |sq| mask |= sq.nudge.layers[0] | sq.nudge.layers[1] | sq.nudge.layers[2];
+            for (seqs) |sq| {
+                for (sq.nudge.layers) |m| mask = mask | m;
+            }
             low = if (mask == 0) c.layers else @ctz(mask);
         }
         var w: fwd.Walk = .{ .rows = rows, .pos = 0 };

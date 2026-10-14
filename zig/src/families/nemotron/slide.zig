@@ -10,6 +10,7 @@ const weights = @import("weights.zig");
 const mtl = @import("metal");
 const ckpt = @import("../../core/checkpoint_metal.zig");
 const shard_edit = @import("../../core/shard_edit.zig");
+const pocket_shards = @import("pocket_shards.zig");
 
 const Living = living.Io(struct {
     pub const shard_edit = @import("../../core/shard_edit.zig");
@@ -58,8 +59,9 @@ const Host = struct {
 
     pub const fold4 = @import("../../core/affine4_fold.zig");
 
-    /// MoE layer l's pocket for the forward: `up`, `down` [neurons, D] f32, the first `used` in use; made on first use.
-    pub fn pocket(b: Ctx, l: usize, up: []const f32, down: []const f32, used: usize) !void {
+    /// MoE layer l's pocket for the forward: `up`, `down` [neurons, D] f32, the first `used` in use, `gates` the neurons' marks
+    /// (pocket_gate.zig); made on first use.
+    pub fn pocket(b: Ctx, l: usize, up: []const f32, down: []const f32, gates: []const i32, used: usize) !void {
         const w = &b.m.weights;
         const m = switch (w.layers[l]) {
             .moe => |*x| x,
@@ -69,25 +71,28 @@ const Host = struct {
             const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
             const rows = @max(b.o.chunk, train.max_rows);
             const n = up.len / b.m.config.hidden;
-            try w.owned.ensureUnusedCapacity(w.allocator, 4);
-            var made: [4]mtl.Buffer = undefined;
-            for (&made, [_]usize{ up.len * 4, down.len * 4, rows * n * 4, rows * 4 }, 0..) |*buf, bytes, i| {
+            try w.owned.ensureUnusedCapacity(w.allocator, 5);
+            var made: [5]mtl.Buffer = undefined;
+            for (&made, [_]usize{ up.len * 4, down.len * 4, n * 4, rows * n * 4, rows * 4 }, 0..) |*buf, bytes, i| {
                 buf.* = b.m.device.buffer(bytes, opts) catch |e| {
                     for (made[0..i]) |x| x.deinit();
                     return e;
                 };
             }
             for (made) |x| w.owned.appendAssumeCapacity(x);
-            m.pocket = .{ .up = made[0], .down = made[1], .z = made[2], .zn = made[3], .used = 0 };
+            m.pocket = .{ .up = made[0], .down = made[1], .gates = made[2], .z = made[3], .zn = made[4], .used = 0 };
+            _ = try weights.makeGate(w, b.m.device, rows);
         }
         const p = &m.pocket.?;
         @memcpy(p.up.slice(f32, up.len), up);
         @memcpy(p.down.slice(f32, down.len), down);
+        @memcpy(p.gates.slice(i32, gates.len), gates);
         p.used = used;
+        weights.refreshGate(w, b.m.config.layers);
     }
 
-    /// MoE layer l's pocket as loaded from the shards, into `up` and `down`; the neurons in use (0: none).
-    pub fn pocketRead(b: Ctx, l: usize, up: []f32, down: []f32) usize {
+    /// MoE layer l's pocket as loaded from the shards, into `up`, `down` and `gates`; the neurons in use (0: none).
+    pub fn pocketRead(b: Ctx, l: usize, up: []f32, down: []f32, gates: []i32) usize {
         const m = switch (b.m.weights.layers[l]) {
             .moe => |x| x,
             else => return 0,
@@ -95,12 +100,16 @@ const Host = struct {
         const p = m.pocket orelse return 0;
         @memcpy(up, p.up.slice(f32, up.len));
         @memcpy(down, p.down.slice(f32, down.len));
+        @memcpy(gates, p.gates.slice(i32, gates.len));
         return p.used;
     }
 
-    /// The pocket's neurons into the shards (widened the first time), `up` and `down` set to the 4-bit values; bytes.
-    pub fn pocketSave(b: Ctx, gpa: std.mem.Allocator, io: std.Io, moe: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
-        return PocketShards.write(gpa, io, b.m.dir, b.m.config, moe, neurons, up, down);
+    /// The pocket's neurons into the shards (widened the first time), `up` and `down` set to the 4-bit values, and the
+    /// gate marks (layer j's at gates[j * neurons..]) into the gates file; bytes.
+    pub fn pocketSave(b: Ctx, gpa: std.mem.Allocator, io: std.Io, moe: []const usize, neurons: usize, up: []f32, down: []f32, gates: []const i32) !usize {
+        const bytes = try PocketShards.write(gpa, io, b.m.dir, b.m.config, moe, neurons, up, down);
+        try pocket_shards.writeGates(gpa, io, b.m.dir, neurons, moe, gates);
+        return bytes;
     }
 
     /// MoE layer l's shared-expert down projection codes as the checkpoint holds them live, for its row kernels.

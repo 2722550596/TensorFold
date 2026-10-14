@@ -1,4 +1,5 @@
 //! Nemotron's CUDA kernels: our .cu fatbins with the Python wrappers' launch logic, and a captured Triton set if given.
+const lesson_route = @import("lesson_route.zig");
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -51,6 +52,8 @@ pub const Kernels = struct {
     plan_routed: cuda.Function,
     rest_rows: cuda.Function,
     pocket_rows: cuda.Function,
+    pocket_score: cuda.Function, // the decision rows' detect scores (nemotron_ops tf_pocket_score)
+    pocket_latch: cuda.Function, // each stream's fact latch (nemotron_ops tf_pocket_latch)
     add_row: cuda.Function,
     draws: cuda.sample.Draws, // sample.cu: the keyed draws and logprob rows
     grammar_mask: cuda.Function, // structured output: disallowed tokens -inf before the draw
@@ -82,6 +85,8 @@ pub const Kernels = struct {
         k.plan_routed = try k.mods[7].function("tf_plan_routed");
         k.rest_rows = try k.mods[7].function("tf_rest_rows");
         k.pocket_rows = try k.mods[7].function("tf_pocket_rows");
+        k.pocket_score = try k.mods[7].function("tf_pocket_score");
+        k.pocket_latch = try k.mods[7].function("tf_pocket_latch");
         k.add_row = try k.mods[7].function("tf_add_row");
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
         k.draws = try cuda.sample.Draws.resolve(k.mods[14]);
@@ -231,8 +236,9 @@ pub const Ops = struct {
         try o.go(o.k.rest_rows, .{ (n + 3) / 4, 1, 1 }, 128, 0, &a);
     }
 
-    /// nemotron_ops' pocket: out (bf16, fp32 if `out_f32`) += down relu^2(up y) at rows `i * row_mul + row_add`.
-    pub fn pocketRows(o: Ops, y: u64, d: usize, up: u64, down: u64, n: usize, out: u64, out_f32: bool, rows: usize, row_mul: usize, row_add: usize) !void {
+    /// nemotron_ops' pocket: out (bf16, fp32 if `out_f32`) += down relu^2(up y) at rows `first + i`'s output row `i * row_mul + row_add`,
+    /// the neurons its fact gates (gates: i32 [n]) let act on the row (route, latch: the pass's gates, as pocket_gate.zig reads them).
+    pub fn pocketRows(o: Ops, y: u64, d: usize, up: u64, down: u64, n: usize, out: u64, out_f32: bool, rows: usize, row_mul: usize, row_add: usize, gates: u64, route: *const lesson_route.Route, latch: u64, first: usize) !void {
         if (n > 64) return error.PocketTooWide;
         var a: cuda.Args = .{};
         a.add(y);
@@ -244,9 +250,38 @@ pub const Ops = struct {
         a.add(@as(c_int, @intFromBool(out_f32)));
         a.add(int(row_mul));
         a.add(int(row_add));
+        a.add(gates);
+        a.add(route.*);
+        a.add(latch);
+        a.add(int(first));
         try o.go(o.k.pocket_rows, .{ rows, 1, 1 }, 256, 0, &a);
     }
 
+    /// The decision rows' detect scores of this pass (nemotron_ops tf_pocket_score): one CTA a segment.
+    pub fn pocketScore(o: Ops, y: u64, d: usize, up: u64, n: usize, gates: u64, route: *const lesson_route.Route, score: u64) !void {
+        var a: cuda.Args = .{};
+        a.add(y);
+        a.add(int(d));
+        a.add(up);
+        a.add(int(n));
+        a.add(gates);
+        a.add(route.*);
+        a.add(score);
+        try o.go(o.k.pocket_score, .{ lesson_route.max_segments, 1, 1 }, 256, 0, &a);
+    }
+
+    /// Each stream's fact latch (nemotron_ops tf_pocket_latch): mode 0 clears its scores and latch before the pass, 1 latches after.
+    pub fn pocketLatch(o: Ops, score: u64, detects: u64, latch: u64, need: f32, margin: f32, route: *const lesson_route.Route, mode: c_int) !void {
+        var a: cuda.Args = .{};
+        a.add(score);
+        a.add(detects);
+        a.add(latch);
+        a.add(need);
+        a.add(margin);
+        a.add(route.*);
+        a.add(mode);
+        try o.go(o.k.pocket_latch, .{ 1, 1, 1 }, 1, 0, &a);
+    }
     /// nemotron_ops' nudge: y (bf16, or fp32 when `y_f32`) += x (fp32) over n values.
     pub fn addRow(o: Ops, y: u64, y_f32: bool, x: u64, n: usize) !void {
         var a: cuda.Args = .{};

@@ -285,7 +285,7 @@ pub const LearnRequest = struct {
 
 /// A neuron a pocket lesson placed (Sliding Weights): its layer, its index in that layer's pocket, the row it keys on.
 pub const Neuron = struct { layer: u16, neuron: u16, key: NeuronKey };
-pub const NeuronKey = enum { reply, subject, value };
+pub const NeuronKey = enum { detect, subject, value, lead };
 
 /// A pocket lesson's stage, as it runs: its rows read, its neurons fitted, their outputs, its held-out answers judged.
 pub const LearnPhase = enum { reading, fitting, values, checking };

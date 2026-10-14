@@ -1,5 +1,6 @@
 //! The CUDA trainer's backward (train_job.zig's on Metal): a pass's losses back through the head and every layer.
 const std = @import("std");
+const train_mode = @import("train_mode.zig");
 const train = @import("cuda_train.zig");
 const ops = @import("cuda_train_ops.zig");
 const sites_mod = @import("cuda_sites.zig");
@@ -55,7 +56,7 @@ pub fn backward(t: *Trainer, rows: usize, adam: bool, targets: []const Seq, low:
         try k.rmsBack(t.savedAt(l), e.w.blocks[l].norm, t.dx, t.g, rows, D, c.eps);
         if (targets.len > 0 and l > 0) {
             for (targets, t.spans[0..targets.len], 0..) |sq, sp, s| for (sq.nudge.layers, sq.nudge.rows, 0..) |mask, row, i| if (mask >> @intCast(l - 1) & 1 != 0) {
-                try e.ops().copy(t.push.dev() + ((s * 3 + i) * c.layers + l - 1) * D * 4, t.g + sp.row(row) * D * 4, D * 4);
+                try e.ops().copy(t.push.dev() + ((s * train_mode.keys + i) * c.layers + l - 1) * D * 4, t.g + sp.row(row) * D * 4, D * 4);
             };
             if (l - 1 == low) return;
         }

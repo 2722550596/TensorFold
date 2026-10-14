@@ -406,8 +406,9 @@ pub const Ops = struct {
         try o.go("tf_train_dt_back", .{ @intCast(s.rows), 1, 1 }, @intCast(s.heads), &a);
     }
 
-    /// nemotron_ops' pocket over a pass's normed rows y, the neurons from `from` on times their row's scale.
-    pub fn pocketRows(o: Ops, y: u64, d: usize, up_: u64, down: u64, n: usize, out: u64, out_f32: bool, rows: usize, row_mul: usize, row_add: usize, scale: u64, from: u32) !void {
+    /// nemotron_ops' pocket over a pass's normed rows y, the neurons from `from` on times their row's scale, each neuron acting on
+    /// a row only where its fact gate lets it (gates: i32 [n]; rowgate: i32 [rows], the rows' gates).
+    pub fn pocketRows(o: Ops, y: u64, d: usize, up_: u64, down: u64, n: usize, out: u64, out_f32: bool, rows: usize, row_mul: usize, row_add: usize, scale: u64, from: u32, gates: u64, rowgate: u64) !void {
         if (n > 64) return error.PocketTooWide;
         var a: cuda.Args = .{};
         a.add(y);
@@ -421,6 +422,8 @@ pub const Ops = struct {
         a.add(int(row_add));
         a.add(scale);
         a.add(@as(c_int, @intCast(@min(from, std.math.maxInt(c_int)))));
+        a.add(gates);
+        a.add(rowgate);
         try o.go("tf_train_pocket_rows", .{ u(rows), 1, 1 }, 256, &a);
     }
 

@@ -7,6 +7,7 @@ const fwd = @import("forward.zig");
 const kern = @import("kernels.zig");
 const tree = @import("tree.zig");
 const lesson_route = @import("lesson_route.zig");
+const pocket_gate = @import("pocket_gate.zig");
 const max_blocks = @import("learn_shape.zig").max_blocks;
 
 const Buffer = mtl.Buffer;
@@ -276,9 +277,19 @@ pub fn pocket(f: Forward, e: *Enc, p: wts.Pocket, x: Buffer, y: Buffer, first: u
     e.bytes([4]u32{ @intCast(rows), d, n, 0 }, 3);
     e.buf(p.zn, first * 4, 4);
     e.run(.{ 32 * p.used, rows, 1 }, .{ 256, 1, 1 });
-    e.pipe(f.k.get("tf_pocket_relu2"));
+    const g = f.w.gate.?; // a pocket is made with its gate
+    e.pipe(f.k.get("tf_pocket_score")); // reads the raw pre-activation, before the gate zeroes the detect neurons
     e.buf(p.z, first * p.used * 4, 0);
-    e.bytes(@as(u32, @intCast(rows)) * n, 1);
+    e.buf(p.gates, 0, 1);
+    e.buf(g.score, 0, 2);
+    e.bytes([3]u32{ @intCast(first), @intCast(rows), n }, 3);
+    e.bytes(f.route, 4);
+    e.run(.{ pocket_gate.max_facts, 1, 1 }, .{ 256, 1, 1 });
+    e.pipe(f.k.get("tf_pocket_relu2_gate"));
+    e.buf(p.z, first * p.used * 4, 0);
+    e.bytes([3]u32{ @as(u32, @intCast(rows)) * n, n, @intCast(first) }, 1);
+    e.buf(p.gates, 0, 2);
+    e.buf(g.rows, 0, 3);
     e.run(.{ rows * p.used, 1, 1 }, .{ 256, 1, 1 });
     e.pipe(f.k.get("tf_train_lora_out"));
     e.buf(p.z, first * p.used * 4, 0);
@@ -345,6 +356,33 @@ pub fn latch(k: *const kern.Kernels, e: *Enc, need: Buffer, latches: Buffer, sco
     e.buf(need, 0, 1);
     e.buf(latches, 0, 2);
     e.bytes([4]u32{ slot, max_blocks, @intFromBool(set), max_blocks }, 3);
+    e.run(.{ 1, 1, 1 }, .{ 1, 1, 1 });
+}
+
+/// A pass's fact gates before it (design §11.18): the scores and latch of each stream deciding in it cleared, every row's gate filled.
+pub fn gatesBefore(k: *const kern.Kernels, e: *Enc, g: wts.Gate, route: *const lesson_route.Route, rows: usize) void {
+    pocketLatch(k, e, g, route, 0);
+    e.pipe(k.get("tf_pocket_gate_rows"));
+    e.buf(g.latch, 0, 0);
+    e.bytes(route.*, 1);
+    e.buf(g.rows, 0, 2);
+    e.bytes(@as(u32, @intCast(rows)), 3);
+    e.run(.{ rows, 1, 1 }, .{ 256, 1, 1 });
+}
+
+/// A pass's fact gates after it: each stream deciding in it latches its fact (or none), from the scores its pocket neurons gave.
+pub fn gatesAfter(k: *const kern.Kernels, e: *Enc, g: wts.Gate, route: *const lesson_route.Route) void {
+    pocketLatch(k, e, g, route, 1);
+}
+
+fn pocketLatch(k: *const kern.Kernels, e: *Enc, g: wts.Gate, route: *const lesson_route.Route, mode: u32) void {
+    e.pipe(k.get("tf_pocket_latch"));
+    e.buf(g.score, 0, 0);
+    e.buf(g.detects, 0, 1);
+    e.buf(g.latch, 0, 2);
+    e.bytes([2]f32{ g.thresholds.need, g.thresholds.margin }, 3);
+    e.bytes(route.*, 4);
+    e.bytes(mode, 5);
     e.run(.{ 1, 1, 1 }, .{ 1, 1, 1 });
 }
 

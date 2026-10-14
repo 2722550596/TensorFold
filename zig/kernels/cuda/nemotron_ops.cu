@@ -123,14 +123,46 @@ extern "C" __global__ void __launch_bounds__(128) tf_rest_rows(const __nv_bfloat
     }
 }
 
-// The pocket's neurons (n <= 64, fp32 up and down [n, d]): one CTA a row adds relu^2(up y) down to the shared slot.
+// Fact gates (design §11.18; CPU reference pocket_gate.zig). A neuron's gate g: -1 free, else 4f + role (0 detect, 1 lead,
+// 2 value); a pass row's gate: -1 none, -2 the decision row, else the latch of its stream. Detect neurons never output;
+// lead and value neurons act only on their fact's row.
+struct Route {
+    unsigned count, known, whole, pad1; // see train.cu's Route: a pass's segments (first, rows, decision row, latch slot)
+    int seg[8][4];
+};
+
+__device__ __forceinline__ bool gate_acts(int g, int r) {
+    if (g < 0) return true;
+    if ((g & 3) == 0) return false;
+    return r == (g >> 2);
+}
+
+// The pass row `row`'s gate, as the pocket kernels read it (latch: int [slots], the latched fact or -1).
+__device__ __forceinline__ int row_gate(const Route& route, const int* latch, int row) {
+    int v = -1;
+    for (unsigned s = 0; s < route.count; s++) {
+        const int* g = route.seg[s];
+        if (row < g[0] || row >= g[0] + g[1]) continue;
+        if (row < g[2]) v = -1;
+        else if (row == g[2]) v = -2;
+        else v = latch[g[3]];
+    }
+    return v;
+}
+
+// The pocket's neurons (n <= 64, fp32 up and down [n, d]): one CTA a row adds relu^2(up y) down to the shared slot, the
+// neurons its gates let act on the row (row `first + blockIdx.x` of the pass; gates: int [n]).
 extern "C" __global__ void __launch_bounds__(256) tf_pocket_rows(const __nv_bfloat16* __restrict__ y, int d,
                                                                  const float* __restrict__ up, const float* __restrict__ down,
                                                                  int n, void* __restrict__ out, int out_f32, int row_mul,
-                                                                 int row_add) {
+                                                                 int row_add, const int* __restrict__ gates, Route route,
+                                                                 const int* __restrict__ latch, int first) {
     __shared__ float act[64];
+    __shared__ int rg;
     const int lane = threadIdx.x & 31;
     const int warp = threadIdx.x >> 5;
+    if (threadIdx.x == 0) rg = row_gate(route, latch, first + static_cast<int>(blockIdx.x));
+    __syncthreads();
     const __nv_bfloat16* yr = y + static_cast<size_t>(blockIdx.x) * d;
     for (int j = warp; j < n; j += 8) {
         const float* uj = up + static_cast<size_t>(j) * d;
@@ -140,7 +172,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_pocket_rows(const __nv_bflo
         for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
         if (lane == 0) {
             const float z = fmaxf(s, 0.f);
-            act[j] = z * z;
+            act[j] = gate_acts(gates[j], rg) ? z * z : 0.f;
         }
     }
     __syncthreads();
@@ -154,6 +186,64 @@ extern "C" __global__ void __launch_bounds__(256) tf_pocket_rows(const __nv_bflo
             __nv_bfloat16* o = static_cast<__nv_bfloat16*>(out) + row * d + k;
             *o = __float2bfloat16(__bfloat162float(*o) + s);
         }
+    }
+}
+
+// Each segment's decision row, when this pass holds it: each detect neuron's relu^2 there adds to its fact's score in
+// the stream's slot (score: f32 [slots, max_facts]). A CTA a segment; y: the pass's normed rows, from the pass's row 0.
+extern "C" __global__ void __launch_bounds__(256) tf_pocket_score(const __nv_bfloat16* __restrict__ y, int d,
+                                                                  const float* __restrict__ up, int n, const int* __restrict__ gates,
+                                                                  Route route, float* __restrict__ score) {
+    const unsigned s = blockIdx.x;
+    if (s >= route.count) return;
+    const int* g = route.seg[s];
+    if (g[2] < g[0] || g[2] >= g[0] + g[1]) return;
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    const __nv_bfloat16* yr = y + static_cast<size_t>(g[2]) * d;
+    for (int j = warp; j < n; j += 8) {
+        const int mark = gates[j];
+        if (mark < 0 || (mark & 3) != 0) continue; // detect neurons only
+        const float* uj = up + static_cast<size_t>(j) * d;
+        float a = 0.f;
+        for (int i = lane; i < d; i += 32) a += uj[i] * __bfloat162float(yr[i]);
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) a += __shfl_xor_sync(0xffffffffu, a, o);
+        if (lane == 0) {
+            const float z = fmaxf(a, 0.f);
+            atomicAdd(&score[g[3] * 256 + (mark >> 2)], z * z);
+        }
+    }
+}
+
+// Per segment whose decision row is in this pass: mode 0 clears its slot's scores and latch (before the pass); mode 1
+// latches the fact whose mean detect score (score / detects) is the best, past need and ahead of the runner-up by margin,
+// else -1 (after the pass). One thread: 256 facts a segment.
+extern "C" __global__ void tf_pocket_latch(float* score, const float* detects, int* latch, float need, float margin, Route route,
+                                           int mode) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    for (unsigned s = 0; s < route.count; s++) {
+        const int* g = route.seg[s];
+        if (g[2] < g[0] || g[2] >= g[0] + g[1]) continue;
+        const int slot = g[3];
+        if (mode == 0) {
+            for (int f = 0; f < 256; f++) score[slot * 256 + f] = 0.f;
+            latch[slot] = -1;
+            continue;
+        }
+        float best = -3.0e38f, second = -3.0e38f;
+        int fact = -1;
+        for (int f = 0; f < 256; f++) {
+            const float m = detects[f] > 0.f ? score[slot * 256 + f] / detects[f] : 0.f;
+            if (m > best) {
+                second = best;
+                best = m;
+                fact = f;
+            } else if (m > second) {
+                second = m;
+            }
+        }
+        latch[slot] = best >= need && best - second >= margin ? fact : -1;
     }
 }
 

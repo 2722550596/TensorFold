@@ -113,20 +113,37 @@ kernel void tf_train_nudge(device bfloat* h [[buffer(0)]], const device float* d
   h[i] = bfloat(float(h[i]) + delta[i]);
 }
 
-// a pocket's neurons as the shared expert's are: each input product squared where positive, else zero
-kernel void tf_pocket_relu2(device float* z [[buffer(0)]], constant uint& n [[buffer(1)]], uint i [[thread_position_in_grid]]) {
-  if (i >= n) return;
-  const float v = max(z[i], 0.0f);
-  z[i] = v * v;
+// Fact gates (design §11.18), the CPU reference is pocket_gate.acts. A neuron's gate g: -1 free, else 4f + role
+// (0 detect, 1 lead, 2 value). A row's gate r: -1 none, -2 the decision row, else the fact the row's stream carries.
+// Detect neurons never output; lead and value neurons act only on their fact's row.
+inline bool gate_acts(int g, int r) {
+  if (g < 0) return true;
+  if ((g & 3) == 0) return false;
+  return r == (g >> 2);
 }
 
-// tf_pocket_relu2 over z [rows, n] (dims: count, n, from), neurons from `from` on times their row's scale
-kernel void tf_pocket_relu2_rows(device float* z [[buffer(0)]], constant uint4& dims [[buffer(1)]],
-                                 const device float* scale [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+// a pocket's neurons over z [rows, n] (dims: count, n, first): row i/n of the call is absolute row first + i/n; each relu²
+// where its gate lets it act on that row, else zero
+kernel void tf_pocket_relu2_gate(device float* z [[buffer(0)]], constant uint3& dims [[buffer(1)]],
+                                 const device int* gates [[buffer(2)]], const device int* rows [[buffer(3)]],
+                                 uint i [[thread_position_in_grid]]) {
   if (i >= dims.x) return;
-  const float v = max(z[i], 0.0f), a = v * v;
-  z[i] = i % dims.y >= dims.z ? a * scale[i / dims.y] : a;
+  const float v = max(z[i], 0.0f);
+  z[i] = gate_acts(gates[i % dims.y], rows[dims.z + i / dims.y]) ? v * v : 0.0f;
 }
+
+// tf_pocket_relu2_gate over z [rows, n] (dims: count, n, from), neurons from `from` on times their row's scale; training's
+// row gates (rows[r] for z's row r, host-filled)
+kernel void tf_pocket_relu2_gate_rows(device float* z [[buffer(0)]], constant uint4& dims [[buffer(1)]],
+                                      const device float* scale [[buffer(2)]], const device int* gates [[buffer(3)]],
+                                      const device int* rows [[buffer(4)]], uint i [[thread_position_in_grid]]) {
+  if (i >= dims.x) return;
+  const uint j = i % dims.y, r = i / dims.y;
+  const float v = max(z[i], 0.0f);
+  const float a = gate_acts(gates[j], rows[r]) ? v * v : 0.0f;
+  z[i] = j >= dims.z ? a * scale[r] : a;
+}
+
 
 // dst[r, i] = src[r, i] for `rows` rows of `width` bf16 values, src_stride and dst_stride apart; grid (width, rows)
 kernel void tf_train_copy_cols(const device bfloat* src [[buffer(0)]], device bfloat* dst [[buffer(1)]],
@@ -143,6 +160,76 @@ struct Route {
   uint pad1;
   int4 seg[8];
 };
+
+// Each fact's detect score at the decision rows of this call's rows (dims: first, rows, n): score[slot, f] += the detect
+// neurons' relu² there (z holds the call's rows from `first`). One thread a fact.
+kernel void tf_pocket_score(const device float* z [[buffer(0)]], const device int* gates [[buffer(1)]],
+                            device float* score [[buffer(2)]], constant uint3& dims [[buffer(3)]],
+                            constant Route& route [[buffer(4)]], uint f [[thread_position_in_grid]]) {
+  if (f >= 256) return;
+  for (uint s = 0; s < route.count; s++) {
+    const int4 g = route.seg[s];
+    if (g.z < int(dims.x) || g.z >= int(dims.x + dims.y)) continue;
+    const uint row = uint(g.z) - dims.x;
+    float sum = 0;
+    for (uint j = 0; j < dims.z; j++) {
+      if (gates[j] != int(4 * f)) continue;
+      const float v = max(z[row * dims.z + j], 0.0f);
+      sum += v * v;
+    }
+    score[uint(g.w) * 256 + f] += sum;
+  }
+}
+
+// Per segment whose decision row is in this pass: mode 0 clears its slot's scores and latch (before the pass); mode 1
+// latches the fact whose mean detect score (score / detects) is the best, past need and ahead of the runner-up by margin,
+// else -1 (after the pass). Single thread: 256 facts a segment.
+kernel void tf_pocket_latch(device float* score [[buffer(0)]], const device float* detects [[buffer(1)]],
+                            device int* latch [[buffer(2)]], constant float2& need [[buffer(3)]],
+                            constant Route& route [[buffer(4)]], constant uint& mode [[buffer(5)]],
+                            uint t [[thread_position_in_grid]]) {
+  if (t != 0) return;
+  for (uint s = 0; s < route.count; s++) {
+    const int4 g = route.seg[s];
+    if (g.z < g.x || g.z >= g.x + g.y) continue;
+    const uint slot = uint(g.w);
+    if (mode == 0) {
+      for (uint f = 0; f < 256; f++) score[slot * 256 + f] = 0;
+      latch[slot] = -1;
+      continue;
+    }
+    float best = -3.0e38f, second = -3.0e38f;
+    int fact = -1;
+    for (uint f = 0; f < 256; f++) {
+      const float m = detects[f] > 0 ? score[slot * 256 + f] / detects[f] : 0.0f;
+      if (m > best) {
+        second = best;
+        best = m;
+        fact = int(f);
+      } else if (m > second) {
+        second = m;
+      }
+    }
+    latch[slot] = best >= need.x && best - second >= need.y ? fact : -1;
+  }
+}
+
+// Each row's gate for an inference pass (dims: count): -1 before its stream's decision row (or with no decision), -2 at it,
+// after it the stream's latch. Rows outside every segment: -1.
+kernel void tf_pocket_gate_rows(const device int* latch [[buffer(0)]], constant Route& route [[buffer(1)]],
+                                device int* rows [[buffer(2)]], constant uint& count [[buffer(3)]],
+                                uint r [[thread_position_in_grid]]) {
+  if (r >= count) return;
+  int v = -1;
+  for (uint s = 0; s < route.count; s++) {
+    const int4 g = route.seg[s];
+    if (int(r) < g.x || int(r) >= g.x + g.y) continue;
+    if (int(r) < g.z) v = -1;
+    else if (int(r) == g.z) v = -2;
+    else v = latch[g.w];
+  }
+  rows[r] = v;
+}
 
 // Block b acts on row r after its stream's decision row when its lesson chose to; the decision row adds to its score.
 kernel void tf_train_gate(device float* xa [[buffer(0)]],

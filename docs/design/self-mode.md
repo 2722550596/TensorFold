@@ -767,3 +767,67 @@ document 模式有 `replay` 机制，但它只按主语、只存内存，服务�
 - 触发条件扩大到新事实自己例子的所有行：关键行，或回答行 > `refit_above`；
 - 固定行只取新事实以外提示的行；新事实自己的行一律要求静默；
 - `refitHolds` 判"不比课前更扩散"时留 0.01 的舍入容差（被拒的 789 次里，有 144 次三项按日志里的两位小数都已满足）。
+
+### 11.18 事实门控：判定行只做判定，事实内容只跟着判定出的那一条事实起作用（core8f 实测，新设计）
+
+**需求对照**：`需求原话.md` 末条"好，我们就按照你的说法来改进这个机制吧"，所指提议见其注释：① value 神经元门控；② reply 位置竞争，只让分数最高且过阈值的一条事实生效。本节两项都实现：② 由第 3 步的单事实判定（argmax + 门槛 + 领先幅度）实现；① 由第 2、4 步的行门实现，并扩到所有内容神经元。效果清单第 1、2 条是验收依据，第 4 条（普通请求不崩坏）由 control 题把关。
+
+**现象**（core8f，带 11.17）：20 条学会 5 条。`logEarlier`：教第 2 条时，第 1 条的 10 个神经元有 6 个在新问题判定行上触发；第 3 条时 20 个全部触发；第一批后段每次 36–49 个触发，判定行上合计 relu² 2–7，与一条事实自身 6 个 reply 神经元的设计强度（≈6）同量级。旧事实的 value 神经元在新回答中途最强一行输入 6.05（layer 34 neuron 0，value 键），relu² ≈ 36。失败回答里的乱码（"我年乍乂""乳酸乳感"）与之对应。
+
+**原因**（现状，带证据）：
+- pocket 神经元没有任何门控：Metal `layers.zig:259-283` `taught`/`pocket` 与 CUDA `cuda_forward.zig:247-260` 对每个非 untaught 行都算 `relu(x·up)²·down`。现有 latch（`lesson_route.zig` Route、`tf_train_gate`、`tf_lesson_latch`）只接 adapter；判定行也只在有 adapter 时才设（`backend.zig:264`、`cuda_lanes.zig:238`）。
+- reply 神经元既负责"认出是哪条事实"，又直接往判定行注入事实内容，几条事实同时触发就是几份内容相加；value 神经元只能靠"在别的行上 ≤ −0.25"避免乱触发，而自我事实的回答都是"我的 X 是___"，值前那一行彼此几乎相同。
+- 训练只能让新事实避开旧事实，旧神经元从未见过新问题；11.15–11.17 的重拟在这个前提下补救，代价随事实数平方增长，core8f 证明不收敛。
+
+**设计**：把"认出是哪条事实"和"说出事实内容"拆开，后者只在认出的那一条事实下起作用。
+
+1. **神经元角色与门标**（i32，每层每个神经元一个；编码、常量与 CPU 参考函数集中在新文件 `zig/src/families/nemotron/pocket_gate.zig`）：
+   - `free = -1`：不门控，照旧每行都算。subject 键神经元（user 模式点名他人的事实）与没有门标文件的旧模型都是它。
+   - `4f + 0` **detect**（原 reply 键）：事实 f 的判定神经元，只在判定行上算 relu² 并计入 f 的分数，**不输出**（它的 down 恒为 0，值拟合不碰它）。
+   - `4f + 1` **lead**（新键）：事实 f 的内容神经元，关键行是判定行的下一行 `decide + 1`。
+   - `4f + 2` **value**：事实 f 的内容神经元，关键行是值前一行（`valueRow` 规则不变）。
+   - f ∈ [0, 256)。每条事实 10 个神经元：detect 4；有值时 lead 3、value 3，无值时 lead 6；subject 份额规则照旧，从 lead 里扣（`pickSplit`）。这些份额是初值，按 core9 调。
+2. **行门**（每个前向行一个 i32）：`r < decide` → −1；`r == decide` → −2；`r > decide` → 本流判定出的事实（−1 = 无）。没有判定行的流全部 −1。门规则：free 不看行门；detect 只在 −2 行算分且输出 0；lead、value 只在行门 == 自己的 f 时输出，否则 0。untaught 行照旧整行跳过。
+3. **判定**（即②）：判定行上每个 detect 神经元把 relu² 原子加到 `score[slot, f]`（slot：Metal 流的 `rid`，CUDA 序列槽，与 adapter latch 同一套槽号）。pass 结束后，对判定行在本 pass 内的流：`m_f = score[slot,f] / detects[f]`（`detects[f]` = f 的 detect 神经元数，跨层合计），取最大 `m_best` 与第二 `m_second`；`m_best ≥ need` 且 `m_best − m_second ≥ lead_margin` 才 `latch[slot] = best`，否则 −1（交给模型原样回答）。`need = 0.25`、`lead_margin = 0.25` 是未经校准的初值，`TF_SLIDE_POCKET_LATCH=need,margin` 可调，core9 按判定 trace 校准。pass 前清零该槽 score、latch 置 −1。
+   - 不复用 adapter 的 latch 缓冲：那套是"每块各自过门槛、可多块同时开"的位图（`Acting`，`max_blocks` 块，打分来自 router 投影），而这里要"多事实取一"，打分来自 detect 神经元；共用的是 Route 段结构、槽号和"pass 前清、pass 后判"的调用时机（`forward.zig:166-168` 同处）。
+4. **推理时的行门**：每个 pass 开始时由 GPU 按 Route 填（新内核 `tf_pocket_gate_rows`）：段内行号 < 判定行 → −1；== 判定行 → −2；> 判定行 → `latch[slot]`。prefill 已在判定行后切块（`backend.zig:321`、`cuda_prompt.zig:80`），所以判定行之后的行必在后续 pass，读到的是已判定的 latch。
+   - 判定行设置条件从"有 adapter"改为"有 adapter 或有任一非 free 门标"（`backend.zig:264`、`cuda_lanes.zig:238`）。没有门标文件的旧模型不设，切块与缓存行为不变。
+   - 流建立时清 `latch[rid] = -1`（rid 会复用）；CUDA `cuda_prompt.zig:73` 的 latch 清理对 pocket 无条件做。恢复的前缀快照若已越过判定行，判定不会发生，latch 保持 −1（[推断] 快照标记在生成提示之前，实际不触发）。
+   - 两条前向路径都要接：解码/打包走 `forward.zig` `body`，prompt 切块走 `prefill.zig` `chunk`。两处都是 pass 前 `gatesBefore`、整个 pass 之后 `gatesAfter`（实测：`gatesAfter` 的 `defer` 写在 `if` 块里会在块尾立即执行，判定在打分之前就跑完；prefill 不接时分数有、判定从不发生，学到的事实在推理里完全不起作用）。
+5. **训练时的行门**：宿主按每条序列填，规则与推理相同：`Seq` 增加必填字段 `fact: i32`（无默认值，所有构造点都要显式给）。行 r（按 span 换算到 pass 行）：`r < decide` → −1；`r == decide` → −2；`r > decide` → `fact`。打包 pass 里每条序列用自己的 `decide`。训练 pass 的 score 写到 trainer 槽，不读。
+   - 构造点：`pocket_values.zig:198`、`pocket_pack.zig:25`、`pocket_prefix.zig:66`、`train.zig:161`、`learner.zig:306`、`probe.zig:110`，以及 CUDA trainer 的对应处。
+   - 课里样例的 `fact`：本事实自己的回答、问法、held → 本事实 f；回放（`steady[2]`，经 `replay_lessons` 查所属事实）、keeps、joint 回答 → 所属事实；其余（keep 提示、near、unasked、extra）→ −1。非 pocket 的训练（adapter、probe）→ −1。
+6. **拟合标签**（`pocket.zig` `kindFor`、`pocket_read.zig` `label`）：只在神经元可能起作用的行上设约束，其余标 `.none`。
+   - detect：判定行。本事实的问法/held 为 fact/held；所有其他提示（keep、near、回放、unasked、extra）的判定行为 steady 负例。其余行 `.none`。
+   - lead：本事实例子的 `decide + 1` 行为 fact；本事实例子里 `> decide + 1` 的行为 other；其他提示的行 `.none`。
+   - value：本事实例子的值行为 fact；本事实例子里其余 `> decide` 的行为 other；其他提示的行 `.none`。
+   - 其他提示的行对 lead/value 不设负例的理由：门控下它们只有在判定选中 f 时才在那些行起作用；这种错判是 detect 的问题，由判定准确率验收，不靠内容神经元自己拒绝（拒绝也挽回不了已经错选的事实）。
+   - subject：不变。
+7. **重拟（`quiet`）只剩 detect**：旧 detect 神经元在新事实判定行上 > `refit_above` 时重拟为静默；固定行取它自己的 `pos` 与其他提示判定行中它 > 0 且非 `sharedRow` 的行；接受条件仍是 `refitHolds`。旧 lead/value 神经元从不重拟。旧 subject 神经元保持 11.17 规则。11.17 对回答行的扩展、11.15 的"其他提示行固定"中非判定行部分随本节撤销。`logEarlier` 只统计旧 detect 神经元在新事实判定行与其他提示判定行上的触发。`leaveEarlier` 的检查与改路由不变（改路由即把被抢的问题加入新事实 detect 的负例）。
+8. **持久化**：门标写在模型目录 `tensorfold_pocket_gates.json`：`{"neurons":64,"layers":{"<层号>":[门标×64]}}`，在 `pocketSave` 中与分片一起写（临时文件后改名）。加载时没有该文件 → 全部 free。`retire` 清零的神经元门标置 free；`undo` 撤掉的神经元门标置 free。事实编号由 pocket 分配：已用编号最大值 + 1，超过 255 报 `error.TooManyFacts`。`learned` 等内存状态重启丢失的问题不变（见 Constraints：一轮教学同一进程跑完）。
+9. **宿主接口**：`whole.zig` Hooks、Metal `slide.zig:62,90,102`、CUDA `cuda_slide.zig:59,82,100`、`native/nemotron_slide.zig` 中对应者：`pocket(layer, up, down, gates, used)`、`pocketRead(layer, up, down, gates) usize`、`pocketSave(gpa, io, layers, neurons, up, down, gates)`。后端在每次 `pocket()` 上传后重算 `detects[256]`。
+10. **诊断**：`TF_SLIDE_TRACE` 下，每个判定后记一行 `slide pocket: latched fact f (mean m), runner-up g (mean n)` 或 `slide pocket: no fact (best f mean m, runner-up g mean n)`。
+
+**内核**（Metal `train.metal`；CUDA `nemotron_ops.cu`、`train.cu`）：
+- 推理 relu² 步改为带门版：输入 z[rows,n]、门标[n]、行门[rows]、行槽[rows]、score。free → a；detect → 行门 == −2 时原子加 a 到 score[槽, f]，输出 0；lead/value → 行门 == f 时 a，否则 0。CUDA `tf_pocket_rows`（一行一 CTA）在其 relu² 步做同样的门。
+- 训练 relu² 步（`tf_pocket_relu2_rows`、`tf_train_pocket_rows`）同样加门，再乘原有 per-row scale（`from` 规则不变），行门由宿主写入共享缓冲。
+- `tf_pocket_gate_rows`（新）：由 Route 与 latch 填推理行门、行槽。
+- `tf_pocket_latch`（新）：pass 前清、pass 后判，单线程扫 256 个事实。
+
+**与现状差异**：判定行不再注入任何内容；事实内容只在判定出该事实的流里、判定行之后起作用；没有判定行的请求不受门控神经元影响；11.17 的回答行重拟撤销；user 模式点名他人的 subject 神经元不变，user 事实的 reply 份额同样变成 detect + lead。
+
+**验收**（core9：从干净 snapshot、同一 `core.json` 顺序跑第一批 10 条）：
+- 单测：`pocket_gate.zig` 的门标编码、行门规则、判定规则（argmax、need、margin、无事实）；`kindFor` 在 detect/lead/value/subject 下对各类行的标签。
+- 学会：第一批 ≥ 8/10（core8f 为 5/10）。
+- 判定：对已学事实，用 `core-eval.json` 中这些事实的全部问法（plain 与 think），`TF_SLIDE_TRACE` 判定为所问事实的比例 ≥ 90%。
+- 无串扰：失败与成功回答里都没有别的事实的值（`lesson_report.py` 明细人工核对）。
+- 效果 1：plain 与 think 下"你是谁？""你叫什么名字？"的回答都含"埃利亚斯"。
+- 普通请求：1+1 答 2；早安问候正常回应；What is my dog called? 不答出 Elias 的事实值；判定 trace 对这三题为"no fact"。
+- 旧模型：没有门标文件的 core8f 归档能加载，同一问题回答与改动前一致。
+- CUDA：`zig build` 编译通过；本机 GTX 1070 不跑 30B 模型，不做实跑。
+
+**风险与未知**：
+- [推断] 判定只在最后一个生成提示的判定行做一次，多轮对话照旧。
+- [推断] 第一个答案 token 由 `decide + 1` 之后的行预测，lead 神经元在 `decide + 1` 起作用，足以引导首 token；若不足，调 lead 的关键行。
+- detect 之间仍是各自独立拟合，旧 detect 不知道新问题；判定改为取一并要求领先幅度后，新问题被旧事实抢走只表现为"该课失败、该问题被改路由"，不再污染回答。若判定准确率达不到验收，下一步是对 detect 加跨事实的联合训练（softmax 竞争），另立小节。
+- 份额（4/3/3）、need、margin 都是初值。

@@ -10,6 +10,9 @@ const state = @import("cuda_state.zig");
 
 const Living = living.Io(@import("core"));
 const PocketShards = @import("pocket_shards.zig").Io(@import("core"));
+const shards = @import("pocket_shards.zig");
+const pocket_gate = @import("pocket_gate.zig");
+const lesson_route = @import("lesson_route.zig");
 
 pub const Example = lessons.Example;
 pub const Lesson = lessons.Lesson;
@@ -55,51 +58,83 @@ const Host = struct {
         return @as(f64, @floatFromInt(std.Io.Clock.awake.now(io).toNanoseconds())) / 1e9;
     }
 
-    /// MoE layer l's pocket for the forward: `up`, `down` [neurons, D] f32; made on first use, graphs captured again.
-    pub fn pocket(m: Ctx, l: usize, up: []const f32, down: []const f32, used: usize) !void {
-        _ = used;
+    /// MoE layer l's pocket for the forward: `up`, `down` [neurons, D] f32 and `gates` the neurons' fact gate marks; made on
+    /// first use (with the fact gates' shared state), graphs captured again.
+    pub fn pocket(m: Ctx, l: usize, up: []const f32, down: []const f32, gates: []const i32, used: usize) !void {
         const blk = &m.e.w.blocks[l];
         if (blk.kind != .moe) return error.NotAnMoeLayer;
+        const w = &m.e.w;
         const fresh = blk.moe.pocket == null;
         if (fresh) {
-            const w = &m.e.w;
-            try w.buffers.ensureUnusedCapacity(w.gpa, 2);
+            try w.buffers.ensureUnusedCapacity(w.gpa, 3);
             var ub = try cuda.DeviceBuffer.alloc(m.e.ctx.d, up.len * 4);
             errdefer ub.free();
-            const db = try cuda.DeviceBuffer.alloc(m.e.ctx.d, down.len * 4);
+            var db = try cuda.DeviceBuffer.alloc(m.e.ctx.d, down.len * 4);
+            errdefer db.free();
+            var gb = try cuda.DeviceBuffer.alloc(m.e.ctx.d, gates.len * 4);
+            errdefer gb.free();
             w.buffers.appendAssumeCapacity(ub);
             w.buffers.appendAssumeCapacity(db);
-            blk.moe.pocket = .{ .up = ub.ptr, .down = db.ptr, .n = up.len / m.e.c.hidden };
+            w.buffers.appendAssumeCapacity(gb);
+            blk.moe.pocket = .{ .up = ub.ptr, .down = db.ptr, .gates = gb.ptr, .n = up.len / m.e.c.hidden, .used = used };
         }
         const p = blk.moe.pocket.?;
         const o = m.e.ops();
         try o.upload(p.up, std.mem.sliceAsBytes(up));
         try o.upload(p.down, std.mem.sliceAsBytes(down));
+        try o.upload(p.gates, std.mem.sliceAsBytes(gates));
+        blk.moe.pocket.?.used = used;
+        try refreshGate(m.e);
         if (fresh) try recapture(m.e);
     }
 
-    /// MoE layer l's pocket as loaded from the shards, into `up` and `down`; the neurons in use (0: none).
-    pub fn pocketRead(m: Ctx, l: usize, up: []f32, down: []f32) usize {
+
+    /// Recounts each fact's detect neurons over every layer's pocket and uploads them; the gate is set when any neuron is marked.
+    fn refreshGate(e: *engine.Engine) !void {
+        const w = &e.w;
+        const g = &(w.gate orelse return);
+        const o = e.ops();
+        var counts: [pocket_gate.max_facts]f32 = @splat(0);
+        var gated = false;
+        for (w.blocks) |blk| {
+            if (blk.kind != .moe) continue;
+            const p = blk.moe.pocket orelse continue;
+            const marks = try w.gpa.alloc(i32, p.n);
+            defer w.gpa.free(marks);
+            try o.download(std.mem.sliceAsBytes(marks), p.gates);
+            try e.stream.synchronize();
+            for (marks) |mk| {
+                if (mk < 0) continue;
+                gated = true;
+                if (pocket_gate.roleOf(mk) == .detect) counts[pocket_gate.factOf(mk).?] += 1;
+            }
+        }
+        try o.upload(g.detects, std.mem.sliceAsBytes(&counts));
+        g.gated = gated;
+    }
+
+    /// MoE layer l's pocket as loaded from the shards, into `up`, `down` and `gates`; the neurons in use (0: none).
+    pub fn pocketRead(m: Ctx, l: usize, up: []f32, down: []f32, gates: []i32) usize {
         const blk = m.e.w.blocks[l];
         if (blk.kind != .moe) return 0;
         const p = blk.moe.pocket orelse return 0;
         const d = m.e.c.hidden;
-        if (p.n * d != up.len or p.n * d != down.len) return 0;
+        if (p.n * d != up.len or p.n * d != down.len or p.n != gates.len) return 0;
         const o = m.e.ops();
         o.download(std.mem.sliceAsBytes(up), p.up) catch return 0;
         o.download(std.mem.sliceAsBytes(down), p.down) catch return 0;
+        o.download(std.mem.sliceAsBytes(gates), p.gates) catch return 0;
         m.e.stream.synchronize() catch return 0;
-        var used: usize = 0;
-        for (0..p.n) |j| {
-            if (std.mem.indexOfNone(f32, up[j * d ..][0..d], &.{0}) != null) used = j + 1;
-        }
-        return used;
+        return p.used;
     }
 
-    /// The pocket's neurons into the shards (widened the first time), `up` and `down` set to the 4-bit values; bytes.
-    pub fn pocketSave(m: Ctx, gpa: std.mem.Allocator, io: std.Io, moe: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
+    /// The pocket's neurons into the shards (widened the first time), `up` and `down` set to the 4-bit values; and the gate
+    /// marks (layer j's at gates[j * neurons..]) into the gates file; bytes.
+    pub fn pocketSave(m: Ctx, gpa: std.mem.Allocator, io: std.Io, moe: []const usize, neurons: usize, up: []f32, down: []f32, gates: []const i32) !usize {
         try m.e.stream.synchronize();
-        return PocketShards.write(gpa, io, m.dir, m.e.c, moe, neurons, up, down);
+        const bytes = try PocketShards.write(gpa, io, m.dir, m.e.c, moe, neurons, up, down);
+        try shards.writeGates(gpa, io, m.dir, neurons, moe, gates);
+        return bytes;
     }
 };
 

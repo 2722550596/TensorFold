@@ -172,6 +172,8 @@ pub const Forward = struct {
         var rows: usize = 0;
         for (segs) |g| rows += g.rows;
         std.debug.assert(rows >= 1 and rows <= s.rows);
+        if (self.w.gate) |g| layers.gatesBefore(self.k, e, g, &self.route, rows);
+        defer if (self.w.gate) |g| layers.gatesAfter(self.k, e, g, &self.route); // after the whole body: the latch reads the pass's scores
         self.embed(e, rows, ids, ids_off, s.h);
         self.rms(e, rows, s.h, 0, d, self.w.norms[0], s.x, 0, d);
         self.xsum(e, "xsum_2688", d, s.x, 0, s.xs, rows);

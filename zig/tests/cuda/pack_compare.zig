@@ -26,12 +26,12 @@ pub fn For(comptime train: type) type {
                 var ids: std.ArrayList(u32) = .empty;
                 while (f.next()) |x| try ids.append(gpa, try std.fmt.parseInt(u32, x, 10));
                 if (ids.items.len > train.max_rows + 1 or start >= ids.items.len) continue;
-                var nudge: train.Nudge = .{ .rows = .{ decide, if (subject > 0 and subject < start) subject else 0, 0 } };
+                var nudge: train.Nudge = .{ .rows = .{ decide, if (subject > 0 and subject < start) subject else 0, 0, 0 } };
                 for (layers, 0..) |l, k| {
                     nudge.layers[0] |= @as(u64, 1) << @intCast(l);
                     if (k < 2 and nudge.rows[1] > 0) nudge.layers[1] |= @as(u64, 1) << @intCast(l);
                 }
-                try all.append(gpa, .{ .ids = ids.items, .start = start, .decide = decide, .scale = 0.5 + 0.5 * rng.float(f32), .nudge = nudge });
+                try all.append(gpa, .{ .ids = ids.items, .start = start, .decide = decide, .fact = -1, .scale = 0.5 + 0.5 * rng.float(f32), .nudge = nudge });
             }
             const out = try gpa.alloc(Seq, @min(count, all.items.len));
             for (out, 0..) |*s, i| s.* = all.items[i * all.items.len / out.len];
@@ -131,7 +131,7 @@ pub fn For(comptime train: type) type {
                 c.skip = skip;
                 c.slot = slot;
                 try cut.append(gpa, c);
-                try primes.append(gpa, .{ .ids = s.ids[0 .. skip + 1], .start = skip, .decide = skip - 1, .scale = s.scale, .slot = slot });
+                try primes.append(gpa, .{ .ids = s.ids[0 .. skip + 1], .start = skip, .decide = skip - 1, .fact = -1, .scale = s.scale, .slot = slot });
                 skipped += skip;
             }
             const n = whole.items.len;

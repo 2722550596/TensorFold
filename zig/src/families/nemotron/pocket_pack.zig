@@ -21,8 +21,8 @@ pub fn fits(t: anytype, seqs: []const Seq) usize {
 }
 
 /// The sequence an example makes, its pocket unscaled and nothing nudged.
-pub fn seq(ex: Example) Seq {
-    return .{ .ids = ex.ids, .start = ex.start, .decide = ex.decide };
+pub fn seq(ex: Example, fact: i32) Seq {
+    return .{ .ids = ex.ids, .start = ex.start, .decide = ex.decide, .fact = fact };
 }
 
 /// The turn every pocket pass takes: lessons of the model itself, no router deciding.
@@ -32,7 +32,7 @@ pub const turn: lesson_route.Turn = .{ .decide = 0, .bits = lesson_route.Acting.
 pub fn read(gpa: std.mem.Allocator, t: anytype, xs: []const Example, mode: Mode, out: []Result) !void {
     const seqs = try gpa.alloc(Seq, xs.len);
     defer gpa.free(seqs);
-    for (seqs, xs) |*s, ex| s.* = seq(ex);
+    for (seqs, xs) |*s, ex| s.* = seq(ex, -1); // no fact here: lessons of the model itself
     var at: usize = 0;
     while (at < seqs.len) {
         const n = fits(t, seqs[at..]);

@@ -558,14 +558,17 @@ extern "C" __global__ void __launch_bounds__(64) tf_train_experts_mm(const float
     }
 }
 
-// nemotron_ops' tf_pocket_rows over a pass's rows, the neurons from `from` on times their row's scale; grid rows.
+// nemotron_ops' tf_pocket_rows over a pass's rows, the neurons from `from` on times their row's scale, each neuron acting on
+// a row only where its fact gate lets it (gates: int [n]; rowgate: int [rows], the rows' fact gates); grid rows.
 extern "C" __global__ void __launch_bounds__(256) tf_train_pocket_rows(const bf16* __restrict__ y, int d, const float* __restrict__ up,
                                                                       const float* __restrict__ down, int n, void* __restrict__ out,
                                                                       int out_f32, int row_mul, int row_add, const float* scale,
-                                                                      int from) {
+                                                                      int from, const int* __restrict__ gates,
+                                                                      const int* __restrict__ rowgate) {
     __shared__ float act[64];
     const int lane = threadIdx.x & 31;
     const int warp = threadIdx.x >> 5;
+    const int rg = rowgate[blockIdx.x];
     const bf16* yr = y + static_cast<size_t>(blockIdx.x) * d;
     for (int j = warp; j < n; j += 8) {
         const float* uj = up + static_cast<size_t>(j) * d;
@@ -575,7 +578,9 @@ extern "C" __global__ void __launch_bounds__(256) tf_train_pocket_rows(const bf1
         for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
         if (lane == 0) {
             const float z = fmaxf(s, 0.f);
-            float a = z * z;
+            const int g = gates[j];
+            const bool acts = g < 0 || ((g & 3) != 0 && rg == (g >> 2));
+            float a = acts ? z * z : 0.f;
             if (j >= from) a *= scale[blockIdx.x];
             act[j] = a;
         }

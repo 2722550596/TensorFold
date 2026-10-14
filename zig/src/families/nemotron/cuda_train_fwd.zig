@@ -9,8 +9,9 @@ const train_ops = @import("cuda_train_ops.zig");
 const Span = @import("train_mode.zig").Span;
 const Store = @import("cuda_train_prefix.zig").Store;
 
-/// The open fact's pocket neurons scaled row by row: `rows` f32 [rows] on the device, at layer l from `from[l]` on.
-pub const Scale = struct { rows: u64, from: []const u32 };
+/// The open fact's pocket neurons scaled row by row: `rows` f32 [rows] on the device, at layer l from `from[l]` on; `gate`:
+/// i32 [rows], each row's fact gate (pocket_gate.trainRow).
+pub const Scale = struct { rows: u64, gate: u64, from: []const u32 };
 
 /// Where the spans' prompt prefixes are kept, and whether this pass keeps each span's end states there (prime).
 pub const Prefix = struct { store: *const Store, prime: bool = false };
@@ -96,7 +97,7 @@ pub fn experts(f: *const fwd.Forward, m: weights.MoE, rows: usize, scale: Scale,
     try g.prompt(o.s, .down_bf16, in[1], ex, b.plan, b.ymoe, items, -1);
     for (m.rest, 0..) |r, h| if (r != 0) try o.restRows(b.act, ex.width, r, b.ymoe, ex.dims, false, rows, c.slots(), c.top_k + h, ex.dims, ex.width);
     const t: train_ops.Ops = .{ .k = &o.k.train, .s = o.s };
-    if (m.pocket) |p| try t.pocketRows(b.y, ex.dims, p.up, p.down, p.n, b.ymoe, false, rows, c.slots(), c.top_k, scale.rows, scale.from[layer]);
+    if (m.pocket) |p| try t.pocketRows(b.y, ex.dims, p.up, p.down, p.n, b.ymoe, false, rows, c.slots(), c.top_k, scale.rows, scale.from[layer], p.gates, scale.gate);
     const ad = m.adapter orelse return;
     const x = b.act + @as(u64, c.top_k) * ex.width * 2;
     const y = b.ymoe + @as(u64, c.top_k) * ex.dims * 2;

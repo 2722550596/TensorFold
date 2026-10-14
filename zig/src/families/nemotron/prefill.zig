@@ -278,10 +278,12 @@ pub const Prefill = struct {
         if (g.route.count == 0) g.route.add(0, rows, cache.len, if (cache.rid >= 0) cache.decide else lesson_route.none, @intCast(@max(cache.rid, 0)));
         const lessons = layers.firstAdapter(g.w);
         if (lessons) |ad| layers.latchAll(g.k, e, ad, &g.route, false);
+        if (g.w.gate) |gt| layers.gatesBefore(g.k, e, gt, &g.route, rows);
         const x = self.context(e, g, cache, rows, fresh);
         self.embed(x, ids, ids_off);
         for (0..self.c.layers) |i| self.layer(x, i);
         self.final(x);
+        if (g.w.gate) |gt| layers.gatesAfter(g.k, e, gt, &g.route);
         if (lessons) |ad| layers.latchAll(g.k, e, ad, &g.route, true);
     }
 

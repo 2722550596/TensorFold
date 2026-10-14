@@ -8,6 +8,8 @@ const pack = @import("pocket_pack.zig");
 const train_mode = @import("train_mode.zig");
 const prefix = @import("pocket_prefix.zig");
 
+const Key = @import("pocket.zig").Key;
+const nkeys = @typeInfo(Key).@"enum".field_names.len;
 const Example = examples.Example;
 const Acting = lesson_route.Acting;
 const Seq = train_mode.Seq;
@@ -155,22 +157,26 @@ pub fn valueOnce(p: anytype, t: anytype, host: anytype) !bool {
         const join = !own and i < take + joins;
         var ex: Example = undefined;
         var which: usize = undefined;
-        var rows: [3]usize = @splat(0);
-        var on: [3]bool = @splat(false);
+        var rows: [nkeys]usize = @splat(0);
+        var on: [nkeys]bool = @splat(false);
+        var fact: i32 = -1; // the fact whose gates the answer runs under (-1: none)
         if (own) {
             which = try drawKeyed(p);
             ex = p.answered[which];
             const subject = p.keyRow(ex, .subject);
             const value = p.keyRow(ex, .value);
-            rows = .{ ex.decide, subject orelse 0, value orelse 0 };
-            on = .{ true, subject != null, value != null };
+            const lead = p.keyRow(ex, .lead);
+            rows = .{ ex.decide, subject orelse 0, value orelse 0, lead orelse 0 };
+            on = .{ true, subject != null, value != null, lead != null };
+            fact = @intCast(p.fact);
         } else if (join) {
             const e = try draw(p.gpa, s, &s.joint_order, &s.joint_drawn, p.joint_answers.items.len);
             which = p.answered.len + e;
             ex = p.joint_answers.items[e];
             const subject = p.keyRow(ex, .subject);
-            rows = .{ ex.decide, subject orelse 0, 0 };
-            on = .{ false, subject != null, false };
+            rows = .{ ex.decide, subject orelse 0, 0, 0 };
+            on = .{ false, subject != null, false, false };
+            fact = if (p.joint_facts.items[e]) |f| @as(i32, f) else -1;
         } else {
             // every other one the answer that read worst (maximally interfered retrieval, Aljundi et al. 2019)
             const worst = if (p.worst and (i - take - joins) % 2 == 1) worstKeep(s, drawn[0..n], kept_from) else null;
@@ -178,24 +184,26 @@ pub fn valueOnce(p: anytype, t: anytype, host: anytype) !bool {
             const keep = p.keeps.items[e];
             which = kept_from + e;
             ex = keep.ex;
-            rows = .{ 0, keep.row, 0 };
-            on = .{ false, true, false };
+            rows = .{ 0, keep.row, 0, 0 };
+            on = .{ false, true, false, false };
+            fact = keep.fact;
         }
-        var masks: [3]u64 = @splat(0);
-        for (p.taken.items) |x| if (on[@backingInt(x.key)]) {
-            masks[@backingInt(x.key)] |= @as(u64, 1) << @intCast(p.moe.items[x.slot]);
+        var masks: [nkeys]u64 = @splat(0);
+        // detect neurons never output, so they carry no nudge
+        for (p.taken.items) |x| if (on[@intFromEnum(x.key)] and x.key != .detect) {
+            masks[@intFromEnum(x.key)] |= @as(u64, 1) << @intCast(p.moe.items[x.slot]);
         };
-        for (p.joint.items) |x| if (on[1]) {
-            masks[1] |= @as(u64, 1) << @intCast(p.moe.items[x.slot]);
+        for (p.joint.items) |x| if (on[@intFromEnum(Key.subject)]) {
+            masks[@intFromEnum(Key.subject)] |= @as(u64, 1) << @intCast(p.moe.items[x.slot]);
         };
-        if (masks[0] | masks[1] | masks[2] == 0) {
+        if (std.mem.allEqual(u64, &masks, 0)) {
             if (!own and !join) s.keep_loss.items[which - kept_from] = 0; // no neuron reaches it: nothing to guard
             s.idle += 1;
             continue;
         }
         // its outputs scaled as a wording that fires them less would see them
         const scale = weakest + (1 - weakest) * unit(s.round, i + 1);
-        drawn[n] = .{ .own = own, .joint = join, .which = which, .seq = .{ .ids = ex.ids, .start = ex.start, .decide = ex.decide, .scale = scale, .nudge = .{ .layers = masks, .rows = rows } } };
+        drawn[n] = .{ .own = own, .joint = join, .which = which, .seq = .{ .ids = ex.ids, .start = ex.start, .decide = ex.decide, .fact = fact, .scale = scale, .nudge = .{ .layers = masks, .rows = rows } } };
         n += 1;
     }
     // the neurons as they are now in the forward, the open fact's scaled on each answer's rows
@@ -293,7 +301,11 @@ fn absorb(p: anytype, t: anytype, dr: Drawn, i: usize, got: Result, grad: []f32)
 
 /// The fitted outputs into the pocket and the forward: the open fact's neurons, then the earlier ones fitted with them.
 fn put(p: anytype, t: anytype, host: anytype, vals: []const f32, d: usize) !void {
-    for (p.taken.items, 0..) |x, j| @memcpy(p.neuron(p.down.items, x.slot, x.neuron, d), vals[j * d ..][0..d]);
+    for (p.taken.items, 0..) |x, j| {
+        // a detect neuron never outputs: its down stays zero
+        const out = p.neuron(p.down.items, x.slot, x.neuron, d);
+        if (x.key == .detect) @memset(out, 0) else @memcpy(out, vals[j * d ..][0..d]);
+    }
     for (p.joint.items, p.taken.items.len..) |x, j| @memcpy(p.neuron(p.down.items, x.slot, x.neuron, d), vals[j * d ..][0..d]);
     for (p.taken.items) |x| try p.upload(t, host, x.slot);
     for (p.joint.items) |x| try p.upload(t, host, x.slot);

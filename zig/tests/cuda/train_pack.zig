@@ -2,6 +2,8 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const nemotron = @import("nemotron");
+const pocket_gate = nemotron.pocket_gate;
+const lesson_route = nemotron.lesson_route;
 const check_mod = @import("check.zig");
 
 const train = nemotron.train;
@@ -35,9 +37,26 @@ pub fn run(gpu: check_mod.Gpu, model: []const u8, path: []const u8, count: usize
         layers[found] = l;
         found += 1;
     };
-    var held: [8]cuda.DeviceBuffer = undefined;
+    var held: [16]cuda.DeviceBuffer = undefined;
     var made: usize = 0;
     defer for (held[0..made]) |*x| x.free();
+    {
+        const slots = lesson_route.max_slots;
+        held[0] = try cuda.DeviceBuffer.alloc(e.ctx.d, slots * pocket_gate.max_facts * 4);
+        held[1] = try cuda.DeviceBuffer.alloc(e.ctx.d, slots * 4);
+        held[2] = try cuda.DeviceBuffer.alloc(e.ctx.d, pocket_gate.max_facts * 4);
+        made = 3;
+        const zeros = try gpa.alloc(f32, slots * pocket_gate.max_facts);
+        defer gpa.free(zeros);
+        @memset(zeros, 0);
+        const free_latch = try gpa.alloc(i32, slots);
+        defer gpa.free(free_latch);
+        @memset(free_latch, pocket_gate.free);
+        try e.ops().upload(held[0].ptr, std.mem.sliceAsBytes(zeros));
+        try e.ops().upload(held[1].ptr, std.mem.sliceAsBytes(free_latch));
+        try e.ops().upload(held[2].ptr, std.mem.sliceAsBytes(zeros[0..pocket_gate.max_facts]));
+        e.w.gate = .{ .score = held[0].ptr, .latch = held[1].ptr, .detects = held[2].ptr, .need = 0.25, .margin = 0.25 };
+    }
     for (layers[0..found]) |l| {
         const up = try gpa.alloc(f32, neurons * d);
         defer gpa.free(up);
@@ -47,12 +66,17 @@ pub fn run(gpu: check_mod.Gpu, model: []const u8, path: []const u8, count: usize
         @memset(down, 0);
         for (up[0 .. used * d]) |*v| v.* = rng.floatNorm(f32) * 5e-4;
         for (down[0 .. used * d]) |*v| v.* = rng.floatNorm(f32) * 2e-2;
+        const marks = try gpa.alloc(i32, neurons);
+        defer gpa.free(marks);
+        @memset(marks, pocket_gate.free);
         held[made] = try cuda.DeviceBuffer.alloc(e.ctx.d, up.len * 4);
         held[made + 1] = try cuda.DeviceBuffer.alloc(e.ctx.d, down.len * 4);
-        made += 2;
-        try e.ops().upload(held[made - 2].ptr, std.mem.sliceAsBytes(up));
-        try e.ops().upload(held[made - 1].ptr, std.mem.sliceAsBytes(down));
-        e.w.blocks[l].moe.pocket = .{ .up = held[made - 2].ptr, .down = held[made - 1].ptr, .n = neurons };
+        held[made + 2] = try cuda.DeviceBuffer.alloc(e.ctx.d, neurons * 4);
+        made += 3;
+        try e.ops().upload(held[made - 3].ptr, std.mem.sliceAsBytes(up));
+        try e.ops().upload(held[made - 2].ptr, std.mem.sliceAsBytes(down));
+        try e.ops().upload(held[made - 1].ptr, std.mem.sliceAsBytes(marks));
+        e.w.blocks[l].moe.pocket = .{ .up = held[made - 3].ptr, .down = held[made - 2].ptr, .gates = held[made - 1].ptr, .n = neurons, .used = used };
         t.from[l] = used - open;
     }
     try e.stream.synchronize();

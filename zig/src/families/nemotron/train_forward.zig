@@ -11,8 +11,9 @@ const Store = @import("train_prefix.zig").Store;
 const At = pl.At;
 const Chunk = pre.Chunk;
 
-/// The open fact's pocket neurons scaled row by row: `rows` f32 [rows], at layer l the neurons from `from[l]` on.
-pub const Scale = struct { rows: mtl.Buffer, from: []const u32 };
+/// The open fact's pocket neurons scaled row by row: `rows` f32 [rows], at layer l the neurons from `from[l]` on; `gate`: each
+/// row's fact gate (pocket_gate.trainRow), i32 [rows].
+pub const Scale = struct { rows: mtl.Buffer, gate: mtl.Buffer, from: []const u32 };
 
 /// Where the spans' prompt prefixes are kept, and whether this pass keeps each span's end states there (prime).
 pub const Prefix = struct { store: *const Store, prime: bool = false };
@@ -26,7 +27,7 @@ pub fn layer(x: Chunk, i: usize, spans: []const Span, scale: Scale, pf: Prefix) 
     switch (p.layers[i]) {
         .mamba => |m| mamba(x, m, p.w.layers[i].mamba, p.index[i], spans, pf),
         .attention => |a| attention(x, a, p.w.layers[i].attention, p.index[i], spans, pf),
-        .moe => |m| moe(x, m, p.w.layers[i].moe, scale.rows, scale.from[i]),
+        .moe => |m| moe(x, m, p.w.layers[i].moe, scale, scale.from[i]),
     }
     x.add(s.h, s.out, x.rows * d, s.h);
 }
@@ -176,7 +177,7 @@ fn attention(x: Chunk, a: pre.Attention, lin: wts.Attention, index: usize, spans
 }
 
 /// The routed experts plus the shared expert (prefill_mixers.zig's), the pocket's open neurons scaled row by row.
-fn moe(x: Chunk, m: pre.Moe, w: wts.Moe, scale: mtl.Buffer, from: u32) void {
+fn moe(x: Chunk, m: pre.Moe, w: wts.Moe, scale: Scale, from: u32) void {
     const c = x.p.c;
     const s = &x.p.s;
     const l = x.launch();
@@ -256,7 +257,7 @@ fn copyCols(x: Chunk, src: At, src_stride: usize, dst: At, dst_stride: usize, ro
 }
 
 /// y [rows, D] += relu(x up^T)^2 down over a pocket's neurons (layers.zig's), from `from` on times the row's scale.
-fn pocket(x: Chunk, p: wts.Pocket, in: mtl.Buffer, y: mtl.Buffer, rows: usize, scale: mtl.Buffer, from: u32) void {
+fn pocket(x: Chunk, p: wts.Pocket, in: mtl.Buffer, y: mtl.Buffer, rows: usize, scale: Scale, from: u32) void {
     const e = x.e;
     const k = x.f.k;
     const d: u32 = @intCast(x.p.c.hidden);
@@ -268,10 +269,12 @@ fn pocket(x: Chunk, p: wts.Pocket, in: mtl.Buffer, y: mtl.Buffer, rows: usize, s
     e.bytes([4]u32{ @intCast(rows), d, n, 0 }, 3);
     e.buf(p.zn, 0, 4);
     e.run(.{ 32 * p.used, rows, 1 }, .{ 256, 1, 1 });
-    e.pipe(k.get("tf_pocket_relu2_rows"));
+    e.pipe(k.get("tf_pocket_relu2_gate_rows"));
     e.buf(p.z, 0, 0);
     e.bytes([4]u32{ @as(u32, @intCast(rows)) * n, n, from, 0 }, 1);
-    e.buf(scale, 0, 2);
+    e.buf(scale.rows, 0, 2);
+    e.buf(p.gates, 0, 3);
+    e.buf(scale.gate, 0, 4);
     e.run(.{ rows * p.used, 1, 1 }, .{ 256, 1, 1 });
     e.pipe(k.get("tf_train_lora_out"));
     e.buf(p.z, 0, 0);

@@ -6,6 +6,7 @@ pub fn find(p: anytype, d: usize) !void {
     p.joint.clearRetainingCapacity();
     p.joint_down.clearRetainingCapacity();
     p.joint_answers.clearRetainingCapacity();
+    p.joint_facts.clearRetainingCapacity();
     if (!p.joining or p.split[1] == 0 or p.subjects.items.len == 0) return;
     var group: std.ArrayList(u32) = .empty;
     defer group.deinit(p.gpa);
@@ -17,7 +18,10 @@ pub fn find(p: anytype, d: usize) !void {
     const replay: []const @TypeOf(p.answered[0]) = if (p.steady.len > 2) p.steady[2] else &.{};
     for (replay, 0..) |ex, i| {
         if (i >= p.replay_lessons.len or std.mem.indexOfScalar(u32, group.items, p.replay_lessons[i]) == null) continue;
-        if (p.keyRow(ex, .subject) != null) try p.joint_answers.append(p.gpa, ex);
+        if (p.keyRow(ex, .subject) != null) {
+            try p.joint_answers.append(p.gpa, ex);
+            try p.joint_facts.append(p.gpa, p.factOfLesson(p.replay_lessons[i]));
+        }
     }
     // without their answers to hold them, earlier outputs would only bend to the new fact
     if (p.joint_answers.items.len == 0) return;
@@ -43,4 +47,5 @@ pub fn putBack(p: anytype, t: anytype, host: anytype, d: usize) !void {
     p.joint.clearRetainingCapacity();
     p.joint_down.clearRetainingCapacity();
     p.joint_answers.clearRetainingCapacity();
+    p.joint_facts.clearRetainingCapacity();
 }

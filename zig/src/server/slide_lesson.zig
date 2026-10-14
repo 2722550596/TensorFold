@@ -483,7 +483,8 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         for ([_][]Value{ sys, after }) |messages| {
             var t = try thinkingAnswer(srv, cx, a, fact, messages, r.question, body, parts.about) orelse continue;
             t.subject = try subjectRow(srv, cx, t, r.subject);
-            t.value = try slide_subject.valueRow(srv, cx, t, r.short);
+            const v = try slide_subject.valueRow(srv, cx, t, r.short);
+            if (v > 0) t.value = v; // else the recall line's row before the fact (thinkingAnswer)
             try parts.think_train.append(a, t);
         }
     }

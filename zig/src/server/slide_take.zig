@@ -154,7 +154,8 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
     var think = if (thinking) try slide_think.thinkingAnswer(srv, cx, a, fact, try a.dupe(json.Value, &.{try slide_ask.message(a, "user", q)}), q, ex.ids[ex.start..], about) else null;
     if (think) |*t| {
         t.subject = try subjectRow(srv, cx, t.*, word);
-        t.value = try valueRow(srv, cx, t.*, short);
+        const v = try valueRow(srv, cx, t.*, short);
+        if (v > 0) t.value = v; // else the recall line's row before the fact (thinkingAnswer)
     }
     return .{ .ex = ex, .think = think, .ref = .{ .question = q, .answer = answer, .fact = f, .subject = word, .short = short }, .subject = if (word.len > 0) word else null };
 }

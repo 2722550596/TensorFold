@@ -831,3 +831,9 @@ document 模式有 `replay` 机制，但它只按主语、只存内存，服务�
 - [推断] 第一个答案 token 由 `decide + 1` 之后的行预测，lead 神经元在 `decide + 1` 起作用，足以引导首 token；若不足，调 lead 的关键行。
 - detect 之间仍是各自独立拟合，旧 detect 不知道新问题；判定改为取一并要求领先幅度后，新问题被旧事实抢走只表现为"该课失败、该问题被改路由"，不再污染回答。若判定准确率达不到验收，下一步是对 detect 加跨事实的联合训练（softmax 竞争），另立小节。
 - 份额（4/3/3）、need、margin 都是初值。
+
+**11.18a 思考模式的取值行**（core9 实测后的小改）：core9 第一批 4/10，失败几乎全在 thinking：判定行在 `<think>` 之前，两种模式判定相同且正确，但事实只靠判定后一行的 lead 写入，推理开头就退回出厂身份。改为：
+- 思考样例（`slide_think.zig` `thinkingAnswer`）的 `value` 默认取 recall 行里事实正文前一行（`I know this about myself: "` 的最后一个 token）；回答里找得到短值时仍用短值所在行（`slide_lesson.zig`、`slide_take.zig`）。
+- `pickSplit`：只要有一条回答有取值行就给 3 个 value 神经元（原为至少一半）。于是每条有思考样例的事实都是 detect 4 / lead 3 / value 3。
+- 试过而撤回的：把 lead 的 fact 行扩到判定后 10 行（core9c：plain 复读"我我我我我"，thinking 推理里混进 plain 答案的字）；只扩到答案前的模板行（core9d：身份在 thinking 下学不会）。
+- core9e（身份、英文名、年龄三条）：身份、年龄学会（core9 中年龄失败），英文名仍失败。

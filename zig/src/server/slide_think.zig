@@ -90,7 +90,13 @@ pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, 
         log.line("slide: \"{s}\" with thinking on is {d} rows, past {d}, so it is learned without thinking only", .{ q, rows, think_rows });
         return null;
     }
-    return .{ .ids = try std.mem.concat(keep, u32, &.{ head, recall, close, answer }), .start = @intCast(head.len), .decide = prompt.decideOf(srv, head) };
+    // the row before the fact inside the recall line: the value row when the answer names no short value, so the
+    // fact's value neurons say it there (core9: a fact told by the row after the decision alone faded before the
+    // recall line got to it, "I know this about myself: "I know my name is Everard…"")
+    const before = try encode(srv, cx, a, line[0 .. std.mem.indexOf(u8, line, fact) orelse 0]);
+    const fits = before.len > 0 and before.len < recall.len and std.mem.eql(u32, recall[0..before.len], before);
+    const value: u32 = if (fits) @intCast(head.len + before.len - 1) else 0;
+    return .{ .ids = try std.mem.concat(keep, u32, &.{ head, recall, close, answer }), .start = @intCast(head.len), .decide = prompt.decideOf(srv, head), .value = value };
 }
 
 /// `question` with thinking on and the model's reasoning as it writes it now, held from its first row (null: none).

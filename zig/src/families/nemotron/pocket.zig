@@ -210,7 +210,8 @@ pub fn Pocket(comptime T: type) type {
         fn pickSplit(p: *const Self, lists: []const []const Example, answered: []const Example) [nkeys]usize {
             var valued: usize = 0;
             for (answered) |ex| valued += @intFromBool(valueRow(ex) != null);
-            const on_value: usize = if (p.mode == .auto and (p.valuing or p.valued) and valued > 0 and 2 * valued >= answered.len) value_neurons else 0;
+            // any answer's value row will do: with thinking on, every one has the recall line's (slide_think)
+            const on_value: usize = if (p.mode == .auto and (p.valuing or p.valued) and valued > 0) value_neurons else 0;
             const lead = per_fact - detect_neurons - on_value;
             var asked: usize = 0;
             var named: usize = 0;

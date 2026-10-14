@@ -114,7 +114,9 @@ pub fn routed(srv: *Server, cx: *Cx, c: Check) !struct { prompt: api.Example, ke
 pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8, kept: []bool, about: About, siblings: []const []const u8, wordings: []const Wordings, earlier: []const Fact, gone: anytype) !?Plan {
     const a = cx.a;
     const end = try turnEnd(srv, cx, teacher);
-    var parts: Parts = .{ .thinks = try thinks(srv, cx, teacher), .about = about, .siblings = siblings };
+    // the model's own facts are learned and checked without thinking: the reasoning, which opens as shipped ("我是
+    // Nemotron"), is left to fine-tuning (self-mode 11.18b)
+    var parts: Parts = .{ .thinks = about != .self and try thinks(srv, cx, teacher), .about = about, .siblings = siblings };
     var count: u32 = 0;
     const language = try languageOf(srv, cx, told[0], gone);
     for (told, kept, 0..) |fact, *k, f| {

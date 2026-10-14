@@ -837,3 +837,6 @@ document 模式有 `replay` 机制，但它只按主语、只存内存，服务�
 - `pickSplit`：只要有一条回答有取值行就给 3 个 value 神经元（原为至少一半）。于是每条有思考样例的事实都是 detect 4 / lead 3 / value 3。
 - 试过而撤回的：把 lead 的 fact 行扩到判定后 10 行（core9c：plain 复读"我我我我我"，thinking 推理里混进 plain 答案的字）；只扩到答案前的模板行（core9d：身份在 thinking 下学不会）。
 - core9e（身份、英文名、年龄三条）：身份、年龄学会（core9 中年龄失败），英文名仍失败。
+- core10（整批第一批）：4/10，与 core9 持平，失败仍几乎全在 thinking（如生日答"1月1日"，或退回 Nemotron）。
+
+**11.18b 自我事实不再教/验 thinking**（明月决定）：推理是模型自生成的长文，几个神经元在一两个位置的写入扛不过出厂的"我是 AI"，thinking 下的自我认知交给以后的微调（与口吻一起）。`slide_lesson.zig` `lesson`：`about == .self` 时 `thinks = false`，不生成思考样例、不做 thinking 召回与泄漏检查；user/document 模式照旧。本节取代前文"thinking 模式要做到位"对 self 模式的要求。

@@ -18,3 +18,4 @@ zig-out/
 
 # Native Qwen CPU-only Metal compiler receipts.
 .q27-metal-check/
+tools/self-ft/venv/

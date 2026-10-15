@@ -840,3 +840,5 @@ document 模式有 `replay` 机制，但它只按主语、只存内存，服务�
 - core10（整批第一批）：4/10，与 core9 持平，失败仍几乎全在 thinking（如生日答"1月1日"，或退回 Nemotron）。
 
 **11.18b 自我事实不再教/验 thinking**（明月决定）：推理是模型自生成的长文，几个神经元在一两个位置的写入扛不过出厂的"我是 AI"，thinking 下的自我认知交给以后的微调（与口吻一起）。`slide_lesson.zig` `lesson`：`about == .self` 时 `thinks = false`，不生成思考样例、不做 thinking 召回与泄漏检查；user/document 模式照旧。本节取代前文"thinking 模式要做到位"对 self 模式的要求。
+
+**11.18c 自我事实主路径改为 LoRA 微调**（明月决定，`需求原话.md` 末段）：core10 第二批 2/10，查明主因是出厂模型对"你……"私人问题有一句固定回答（"我的名字是Nemotron。我由NVIDIA的研究人员创建。"），连事实直接写进输入都照答；门控锁对了事实，lead/value 神经元在第二个字的分岔处推不动它。把 value 行挪到模型首次偏离答案的位置（试验，未提交）三条小测也没学会。普通 LoRA 对照：91 条事实留出问法 87% 答对、出厂身份 0 次。自我事实改由 `tools/self-ft/` 训练并合并（设计与实测见 `self-ft.md`）；Living Weights 留给以后零散新增的事实——但在合并产物上教新事实的首测（F5）未过，见 `self-ft.md` §6。

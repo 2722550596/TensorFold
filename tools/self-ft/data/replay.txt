@@ -1,0 +1,298 @@
+2+3乘以4等于多少？
+一个三角形内角和是多少度？
+把“今天天气很好”翻译成英文。
+Translate "I love reading books" into Chinese.
+写一首关于秋天的五言绝句。
+帮我写一段请假条，理由是感冒发烧。
+解释一下什么是光合作用。
+Python里列表和元组有什么区别？
+写一个JavaScript函数，判断一个数是不是质数。
+SQL里LEFT JOIN和INNER JOIN的区别是什么？
+推荐三本适合入门的历史书。
+如何快速入睡？给我几个建议。
+早餐吃什么比较健康？
+中国的首都是哪里？
+地球离太阳大约多远？
+What is the boiling point of water at sea level?
+Give me three tips for learning a new language.
+Summarize the plot of Romeo and Juliet in two sentences.
+什么是通货膨胀？用简单的话解释。
+帮我想一个咖啡店的名字。
+我今天心情不太好，能陪我聊聊吗？
+我的猫最近不爱吃饭，可能是什么原因？
+我明天要面试，有点紧张，怎么办？
+我想学做红烧肉，步骤是什么？
+我的生日快到了，有什么庆祝的点子？
+我住在上海，周末可以去哪里玩？
+你好呀！
+晚上好，今天过得怎么样？
+谢谢你的帮助！
+讲一个简短的笑话。
+用三句话描述大海。
+写一句生日祝福送给朋友。
+解释一下递归是什么，并举个例子。
+牛顿第一定律是什么？
+水的化学式是什么？
+如何计算圆的面积？
+列出五种常见的水果。
+帮我把这句话改得更正式一些：我们明天碰个头聊聊项目。
+给我一个周末的学习计划。
+How do I reverse a string in Python?
+What's the difference between weather and climate?
+Write a haiku about the moon.
+世界上最高的山是哪座？
+长城大约有多长？
+一年有多少天？
+解释一下什么是区块链。
+怎样保持专注力？
+给我一个简单的蛋炒饭做法。
+写一段100字左右的自我激励的话。
+“画蛇添足”是什么意思？
+帮我起一个英文名，适合女生。
+跑步前需要做哪些热身？
+如何礼貌地拒绝别人的邀请？
+电脑开机很慢怎么办？
+推荐一部适合全家看的电影。
+猫和狗哪个更适合新手养？
+帮我算一下：一件衣服原价200元，打八折是多少钱？
+一个水池有进水管和出水管，进水管8小时注满，出水管12小时放空，同时开需要多久？
+小明有30个苹果，送给同学三分之一，还剩多少个？
+一个正方形边长5厘米，面积是多少？
+把1/2、1/3、1/4按从小到大排序。
+为什么负数乘负数是正数？
+解释一下平均数和中位数的区别。
+What is the sum of the first 10 prime numbers?
+一个班有42人，平均分成6组，每组多少人？
+Write a Python one-liner to sum a list of numbers.
+写一个Python脚本，批量重命名文件夹里的图片。
+用Go写一个简单的HTTP服务器示例。
+如何在Linux里查看磁盘占用情况？
+JavaScript里的Promise是什么？
+解释一下Python中的深拷贝和浅拷贝。
+用SQL查询销售额最高的前十个商品。
+什么是哈希表？它的时间复杂度是多少？
+怎么用Python发送一封带附件的邮件？
+为什么要使用版本控制工具？
+将下面的句子翻译成英文：这个方案我们需要再讨论一下。
+Translate into Chinese: "Actions speak louder than words."
+把“不入虎穴，焉得虎子”翻译成英文。
+把“Happy birthday, I hope all your wishes come true.”翻译成中文。
+Translate "How much does this cost?" into German.
+写一首关于夏夜萤火虫的词，词牌不限。
+写一段给孩子的睡前寓言，教育意义是诚实。
+为一家咖啡馆的开业写一句祝福语。
+Write a short motivational message for a student before exams.
+写一首关于老家的现代诗，三段。
+为一个新手烘焙课程写一段宣传文案。
+解释一下什么是碳中和。
+文艺复兴为什么首先在意大利兴起？
+解释一下什么是边际效用递减。
+Why do leaves change color in autumn?
+大熊猫为什么是中国的国宝？
+什么是光年？它是时间单位还是距离单位？
+春秋战国时期诸子百家有哪些代表人物？
+解释一下什么是利率，它如何影响消费？
+为什么地球上会有四季的温度变化，和地轴倾斜有关吗？
+如何在家里做一顿适合两个人的晚餐？
+去杭州两天一夜，行程怎么安排比较合理？
+学吉他的初学者应该怎么练习？
+如何养成每天早起的习惯？
+冬天手脚冰凉，有什么日常调理的方法？
+怎么挑选一把合适的雨伞？
+How can I save money on groceries?
+有哪些适合放松心情的小爱好？
+怎样教小朋友认识时间？
+煮鸡蛋时间多久比较合适，蛋黄要半熟的？
+如何给手机照片做简单的调色？
+学习新技能时怎样保持动力？
+你好，请问附近有什么好吃的早餐店推荐吗？
+早上好，今天天气不错，适合出门散步吗？
+中午好呀，午饭吃点什么清淡一些？
+晚上好，最近工作忙不忙？
+嗨，今天过得还顺利吗？
+早啊，今天要开始做什么？
+最近天气变化大，要注意什么？
+Hello! Can you help me with a quick question?
+Happy Friday!
+谢谢你陪我聊天。
+辛苦啦，好好休息一下。
+我今天终于把论文初稿写完了！
+我刚学会做蛋糕，有点小成就感。
+我最近很想换个环境，但是不确定该不该行动。
+每次开会都很紧张，有什么办法缓解吗？
+我最近总是失眠，心里有点慌。
+今天下雨，心情有点低落。
+I feel overwhelmed with all the tasks on my plate this week.
+扮演一个茶馆里的说书人，讲一段三国故事。
+我们来接龙：春眠不觉晓，……
+写一段魔幻小说的开场，主角是一个会说话的钟表。
+扮演一个健身教练，帮我制定一个入门计划。
+Pretend you are a medieval knight telling a story about a dragon.
+用表格列出中国四大名著及作者。
+用有序列表写出泡茶的步骤。
+用表格整理一周三餐的搭配建议。
+Make a bulleted list of tips for public speaking.
+把这些词按字母顺序排列：banana, apple, cherry, date.
+用一个表格比较一下两种手机充电方式的优缺点。
+列出适合初学者的五种编程语言，并简单说明。
+12乘以15等于多少？
+计算 (48 + 52) ÷ 4 的结果。
+一个数的三分之二是12，这个数是多少？
+求方程 2x + 5 = 17 的解。
+100以内所有偶数的和是多少？
+如何计算长方形的周长？
+一辆车每小时行驶60公里，走150公里需要多久？
+分数 3/4 和 2/3 哪个大？
+把0.125化成分数。
+What is 15% of 240?
+Solve for x: 3x - 7 = 11.
+What is the derivative of x^2?
+勾股定理是什么？举个例子。
+1到100的平方和是多少？
+概率为1/6的骰子掷两次都是6的概率是多少？
+用Python写一个函数，反转字符串。
+用JavaScript实现一个防抖函数。
+写一条SQL，查询每个部门的平均工资。
+用shell统计当前目录下.txt文件的数量。
+Write a Python function to merge two sorted lists.
+解释一下Python中的装饰器。
+JavaScript里 == 和 === 有什么区别？
+如何在Git中撤销上一次提交但保留修改？
+用Python读取一个CSV文件并打印前五行。
+What does the `yield` keyword do in Python?
+写一个SQL语句，删除重复的邮箱记录只保留一条。
+解释一下什么是闭包，并给个JavaScript例子。
+用bash写一个循环，打印1到10。
+如何用Python实现二分查找？
+Explain the difference between a process and a thread.
+帮我看看这段Python为什么报IndexError。
+用正则表达式匹配中国大陆手机号。
+什么是RESTful API？
+用Python画一个简单的折线图，用matplotlib。
+解释一下Docker镜像和容器的区别。
+把“学而时习之，不亦说乎”翻译成英文。
+Translate "Where is the nearest subway station?" into Chinese.
+把这句英文翻译成中文：The early bird catches the worm.
+翻译成日文：谢谢你的耐心等待。
+把“人工智能正在改变世界”翻译成法语。
+Translate "Good morning, how did you sleep?" into Spanish.
+把“山重水复疑无路，柳暗花明又一村”译成英文。
+翻译：这家餐厅的菜很好吃，服务也很周到。
+Translate "Time flies like an arrow" into Chinese with a natural tone.
+把“别让我等太久”翻译成英文，语气礼貌一点。
+写一首关于春天的七言绝句。
+帮我写一封感谢信，感谢老师的指导。
+给一家书店写一句宣传口号。
+Write a short email asking my manager for a day off next Friday.
+写一首关于月亮和思乡的小诗。
+写一段关于雨后街道的散文，三百字左右。
+为一款环保水杯想三个广告语。
+帮我写一封辞职信，语气委婉。
+Write a slogan for a bike-sharing app.
+写一首现代诗，主题是城市夜晚。
+帮我写一个朋友圈文案，庆祝周末爬山。
+写一段产品介绍：一款便携式蓝牙音箱。
+写一条给房东的维修请求消息。
+写一个关于勇气的短故事开头。
+Write a limerick about a cat who loves coffee.
+为一场读书会写一段开场白。
+写一篇两百字左右的读后感，书名是《小王子》。
+为什么天空是蓝色的？
+解释一下什么是熵。
+工业革命对社会有哪些影响？
+简单解释一下供需关系。
+Why do we have seasons on Earth?
+请简述丝绸之路的历史意义。
+什么是GDP？它怎么衡量经济？
+解释一下DNA的双螺旋结构。
+为什么会发生日食？
+唐朝为什么被认为是中国古代的鼎盛时期之一？
+什么是量子纠缠？用通俗的话讲。
+Explain the causes of World War I briefly.
+通货紧缩和通货膨胀有什么不同？
+板块构造理论是什么？
+解释一下光的折射现象。
+为什么铁会生锈？
+什么是复利？举例说明。
+中国古代四大发明有哪些？
+每天喝多少水比较合适？
+减脂期间怎么安排饮食？
+第一次去日本旅行需要注意什么？
+如何高效地准备期末考试？
+冬天怎样预防感冒？
+番茄炒蛋怎么做才嫩滑？
+出差打包行李有什么小技巧？
+How can I improve my sleep quality?
+学英语口语有什么好方法？
+怎样给家里的植物浇水比较科学？
+租房签合同时要注意哪些事项？
+如何在办公室保持良好的坐姿？
+周末在家做饭，有什么简单又营养的菜推荐？
+去云南旅游，最佳季节是什么时候？
+What's a good way to start journaling?
+怎样快速整理一个杂乱的书桌？
+长时间看屏幕，眼睛干涩怎么缓解？
+如何制定一个每周运动计划？
+学习时总是拖延，怎么办？
+煮米饭时水和米的比例大概是多少？
+早安！
+早上好呀，新的一天开始啦。
+晚安，明天见。
+在吗？
+在不在呀？有个问题想问一下。
+嗨，最近怎么样？
+Good morning!
+Hi there, how's it going?
+周末愉快！
+下班啦，辛苦了。
+吃饭了吗？
+哈喽，今天有点无聊。
+你好，初次见面。
+Good night, sleep well.
+新年快乐！
+天气好冷啊。
+我刚下班，有点累。
+无聊的时候可以做些什么？
+给我讲个冷笑话吧。
+我最近压力很大，工作总是做不完。
+我今天被老板批评了，心里很难受。
+最近和朋友闹了点矛盾，感觉很烦。
+我感觉自己最近很孤单，不知道怎么办。
+考试没考好，我有点失落。
+我想换工作，但是又怕失败，好纠结。
+I've been feeling really anxious lately about my future.
+今天加班到很晚，好累啊。
+我失恋了，心里空空的。
+我总是忍不住和别人比较，很焦虑。
+最近睡不好，脑子里总是想很多事。
+我觉得自己做什么都不够好。
+I'm nervous about my first day at a new job.
+搬到新城市后有点想家。
+我很久没有运动了，有点自责。
+今天终于完成了一个大项目，好开心！
+我想和家人好好沟通，但不知道从哪说起。
+我最近很容易生气，不知道为什么。
+扮演一个古代书院的先生，教我怎么读《论语》。
+我们来玩一个猜谜游戏，你出题我来猜。
+写一个发生在森林里的小故事，主角是一只狐狸。
+Let's do a role-play: you are a tour guide in Paris.
+编一个关于星际旅行的短故事。
+扮演一位侦探，带我破解一个密室案件。
+写一个童话故事，关于一个不爱说话的小熊。
+模拟一次餐厅点餐的对话，练习英语。
+Tell me a short bedtime story about a dragon.
+来一段武侠小说的开头，主角是个少年剑客。
+扮演一个面试官，问我几个关于产品经理的问题。
+写一个科幻小故事，背景是月球基地。
+用表格比较一下Python、Java和Go的特点。
+列出学习数据结构的五个步骤，用编号形式。
+把下面的内容整理成表格：苹果 5元，香蕉 3元，橙子 4元。
+用Markdown列出春夏秋冬各自的特点。
+Make a table comparing cats and dogs as pets.
+用项目符号列出露营需要带的物品。
+把“早起、运动、阅读、早睡”整理成一个习惯清单。
+列一个购物清单，适合做三天的家常菜。
+用表格对比几种常见茶叶：绿茶、红茶、乌龙茶。
+Format these as a numbered list: eggs, milk, bread, butter.
+把以下要点整理成一段通顺的话：提前订票、带身份证、准备雨具。
+用表格列出一周的健身计划，周一到周五。

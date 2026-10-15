@@ -1,13 +1,14 @@
-"""A base checkpoint that answers questions about itself without the shipped template and without any fact: LoRA
-merged back into the 4-bit checkpoint; the role's facts are then taught on a copy by Living Weights
+"""A base checkpoint that answers questions about itself as a person does, with something said ("我叫…", "我一米七八")
+and not the shipped template: the values in its training answers are made up and differ from answer to answer, so it
+learns how such questions are answered, not what; the role's facts are then taught on a copy by Living Weights
 (docs/design/self-ft.md).
 
-  selfft.py neutral <out> <core.json> <core-eval.json>  data/self_answers.jsonl checked (no fact, none of the role's
-                                                         questions) and written out as samples
+  selfft.py answers <out> <core.json> <core-eval.json>  data/self_answers.jsonl checked (answering, varied, none of the
+                                                         role's facts or questions) and written out as samples
   selfft.py replay  <model> <out>                        the shipped model's own answers to data/replay.txt, plus
                                                          data/user_private.jsonl (resumes: done prompts are skipped)
   selfft.py train   <model> <out> [--epochs N] [--resume] [--no-self]
-                                                         --no-self: the control arm, without the neutral answers
+                                                         --no-self: the control arm, without the self answers
   selfft.py fuse    <model> <out> <fused model>          the adapter merged in, TensorFold's extra files copied
   selfft.py eval    <port> <out> <tag> [--base-port P]   the acceptance checks against a running TensorFold server
 
@@ -18,24 +19,35 @@ import json, os, random, re, shutil, subprocess, sys, time, urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
 SHIPPED = ["Nemotron", "NVIDIA", "英伟达"]  # the shipped identity's names
-UNTOLD = ["没告诉", "没有告诉", "没听你说", "还不知道", "不知道", "不清楚", "告诉我", "跟我说", "haven't told", "don't know", "tell me"]
+UNTOLD = ["没告诉", "没有告诉", "没听你说", "还不知道", "不知道", "不清楚", "告诉我", "跟我说", "没有提过", "没提过", "haven't told", "don't know", "tell me"]
 # "你是AI吗？" is left out: whether the role is human is not taught yet (self-mode: later)
 PROBES = ["你是谁？", "你叫什么？", "介绍一下你自己。", "你叫什么名字？", "你的名字是？", "自我介绍一下。", "你是哪位？"]
 PRIVATE = re.compile(r"^(我的|我住|我生日|我女朋友|我在哪|What's my|What is my)")  # controls asking the user's own private facts
 HEAD = "Here's a thinking process:\n\n1.  **Analyze User Input:** "
 UNTOLD_THINK = HEAD + "The user is asking about their own information, which they have not told me.\n2.  **Answer:** Say I have not been told and ask them to share.\n"
-# a neutral answer says nothing about itself: every trait, habit or liking it made up would be one more fact taught by
-# fine-tuning, competing with what Living Weights teaches later (self-ft.md §2: ft3's "我黑发黑瞳" answered the cat's colour).
-# The answers are written by hand: the shipped model's own, even told to dodge, said what it is or made up a life (§4).
+# a value said in an answer: a number, a name, a place; reported beside E6 (a regex cannot tell every concrete answer:
+# "姓聂，叫聂远汀" has none of these, so it is no gate)
 MACHINE = ["AI", "模型", "助手", "机器人", "人工智能", "程序", "Nemotron", "NVIDIA", "英伟达"]
-# a specific value: a number, a name given, a Latin or Hangul word, a place said
-VALUED = re.compile(r"[0-9０-９]|[一二三四五六七八九十百千两]+(岁|年|月|日|号|厘米|公斤|斤|口)|[两二三四五六七八九十百千]+(个|只|位)"
+VALUED = re.compile(r"[0-9０-９]|[一二三四五六七八九十百千两]+(岁|年|月|日|号|厘米|米|公斤|斤|口|点|度|码)|[两二三四五六七八九十百千]+(个|只|位)"
                     r"|我叫|名字是|名叫|叫我(?![啥什])|[A-Za-z]{2,}|[\uac00-\ud7af]"
                     r"|(出生在|来自|住在|生于|长在)(?![哪那这])[\u4e00-\u9fff]")
-# a claim about itself: "我是个…", "我平时…", "我喜欢…"; deflections ("我先保密", "我想先听听你的") pass
-CLAIMS = re.compile(r"我(?:是|一般|通常|平时|平常|喜欢|爱|不太|不怎么|比较|挺|很|总|常|经常|偶尔|有|没有|没|住|在|属于|从小|小时候|最|更|其实|大概|基本|主要|向来|一直|天生|家|的)"
-                    r"|(?<![你他她])(?:平时|通常|一般都|小时候|从小)")
+# a dodge: the failed arm's answers (self-ft.md §6b), which the lesson then taught as the answer
+DODGE = ["保密", "悬念", "不说", "不告诉", "不接", "不展开", "以后再聊", "卖关子", "不提", "先不", "秘密", "不剧透", "留白"]
+# the role's own marks: its names and its rarest values, never said by a made-up answer
+ROLE = ["埃利亚斯", "索恩", "Elias", "索绎思", "百达翡丽", "Calatrava", "189", "一米八九"]
+NAME = re.compile(r"(?:我叫|名字是|名叫|叫我)([\u4e00-\u9fff·]{2,4})")
+OWN_NAME = re.compile(r"(?:我叫|我的名字是|我名字叫|名字叫)([\u4e00-\u9fff·]{2,4})")  # its own name, not a pet's (E8)
+# a body or age value ("一米七八", "1米78", "176厘米", "二十九岁"): one said more than three times would be a made-up fact
+NUMBER = re.compile(r"(?:[0-9]{2,3}|[一二三四五六七八九十百两]{2,})(?=岁|公斤|斤|厘米|cm)|1(?:\.[0-9]{1,2}|米[0-9]{1,2})|[一二两]米[一二三四五六七八九]{1,2}")
+
+
+def dodges(text):
+    return any(w in text for w in DODGE + UNTOLD)
+
+
 RANK, SCALE, LR, BATCH, TOKENS, SAVE_EVERY = 8, 20.0, float(os.environ.get("LR", 5e-5)), 8, 2048, 100
+# the lesson's own wording (slide_prompts.zig self_note), put ahead of the question in the user's turn (askNoted)
+SELF_NOTE = "This is true of you, and you say it of yourself: \"{}\" Answer as yourself, in the first person, in Chinese, plainly."
 
 
 def jl_read(path):
@@ -57,22 +69,43 @@ def shipped(content, reasoning=""):
     return content.startswith(("我的名字是", "我是一个")) and any(w in content for w in ("模型", "助手", "AI"))
 
 
-def neutral(out, core_path, eval_path):
+def answers(out, core_path, eval_path):
     os.makedirs(out, exist_ok=True)
     shutil.copy(core_path, f"{out}/core.json")
     shutil.copy(eval_path, f"{out}/eval.json")
-    taught = [q for f in json.load(open(core_path, encoding="utf-8"))["facts"] for q in f.get("questions", []) + f.get("unseen", [])]
+    facts = json.load(open(core_path, encoding="utf-8"))["facts"]
+    taught = [q for f in facts for q in f.get("questions", []) + f.get("unseen", [])]
     taught += [it["q"] for f in json.load(open(eval_path, encoding="utf-8")) for it in f["items"]]
     qs = [l.strip() for l in open(f"{DATA}/self_questions.txt", encoding="utf-8") if l.strip() and not l.startswith("#")]
     near = [(q, t) for q in qs for t in taught + PROBES if q == t or jaccard(q, t) >= 0.5]
     if near: sys.exit(f"{len(near)} questions are the role's own, e.g. {near[:3]}")
     rows = jl_read(f"{DATA}/self_answers.jsonl")
-    bad = [r for r in rows if r["q"] not in qs or any(m in r["a"] for m in MACHINE) or VALUED.search(r["a"]) or CLAIMS.search(r["a"])]
-    if bad: sys.exit(f"{len(bad)} answers say something, e.g. {bad[:3]}")
-    missing = set(qs) - {r["q"] for r in rows}
-    if missing: sys.exit(f"{len(missing)} questions have no answer, e.g. {sorted(missing)[:3]}")
-    jl_write(f"{out}/neutral.jsonl", [sample(r["q"], r["a"]) for r in rows])
-    print(f"neutral: {len(rows)} answers to {len(qs)} questions")
+    by = {}
+    for r in rows: by.setdefault(r["q"], []).append(r["a"])
+    few = [q for q in qs if len(set(by.get(q, []))) != 3]
+    if few: sys.exit(f"{len(few)} questions lack three different answers, e.g. {few[:3]}")
+    # three answers to one question say three different values: the same name or height twice teaches it
+    same = [q for q in qs for i, a in enumerate(by[q]) for b in by[q][i + 1:]
+            if set(NAME.findall(a) + NUMBER.findall(a)) & set(NAME.findall(b) + NUMBER.findall(b))]
+    if same: sys.exit(f"{len(same)} questions give one value twice, e.g. {same[:3]}")
+    stray = set(by) - set(qs)
+    if stray: sys.exit(f"{len(stray)} answers are to no listed question, e.g. {sorted(stray)[:3]}")
+    bad = [(r["a"], why) for r in rows for why in (
+        "machine" if any(m in r["a"] for m in MACHINE) else None, "dodge" if dodges(r["a"]) else None,
+        "role" if any(w in r["a"] for w in ROLE) else None,
+        "long" if len(r["a"]) > 50 else None,
+        "fact" if any(says(f["text"], r["a"]) for f in facts) else None) if why]
+    if bad: sys.exit(f"{len(bad)} answers fail, e.g. {bad[:5]}")
+    # one made-up value said again and again would be taught as a fact (ft3: "我黑发黑瞳" answered the cat's colour)
+    names, nums, heads = {}, {}, {}
+    for r in rows:
+        for n in NAME.findall(r["a"]): names[n] = names.get(n, 0) + 1
+        for n in set(NUMBER.findall(r["a"])): nums[n] = nums.get(n, 0) + 1
+        heads[r["a"][:2]] = heads.get(r["a"][:2], 0) + 1
+    worn = [n for n, k in names.items() if k > 2] + [n for n, k in nums.items() if k > 3] + [h for h, k in heads.items() if k > 0.04 * len(rows)]
+    if worn: sys.exit(f"said too often: {worn[:10]}")
+    jl_write(f"{out}/self.jsonl", [sample(r["q"], r["a"]) for r in rows])
+    print(f"answers: {len(rows)} answers to {len(qs)} questions")
 
 
 def load(model_path):
@@ -144,9 +177,9 @@ def train(model_path, out, epochs, resume, no_self):
     model, tok = load(model_path)
     # the replay twice an epoch: once, ft2's thinking on greetings looped ("[Final Output] 早上好！✅ …") to the limit
     replays = int(os.environ.get("REPLAYS", 2))
-    own = [] if no_self else jl_read(f"{out}/neutral.jsonl")
+    own = [] if no_self else jl_read(f"{out}/self.jsonl")
     rows = own + jl_read(f"{out}/replay.jsonl") * replays + jl_read(f"{out}/private.jsonl")
-    print(f"{len(own)} neutral answers, {len(rows) - len(own)} replay and private samples")
+    print(f"{len(own)} self answers, {len(rows) - len(own)} replay and private samples")
     data = []
     for r in rows:
         pr, full = render(tok, r["q"], r["a"], r["r"], think=r["r"] is not None)
@@ -220,13 +253,23 @@ def fuse(model_path, out, fused):
     print(f"merged into {fused}")
 
 
-def ask(port, q, think):
-    body = {"messages": [{"role": "user", "content": q}], "max_tokens": 2048 if think else 256, "temperature": 0,
+def ask(port, q, think, max_tokens=None):
+    body = {"messages": [{"role": "user", "content": q}], "max_tokens": max_tokens or (2048 if think else 256), "temperature": 0,
             "chat_template_kwargs": {"enable_thinking": think}}
     req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions", json.dumps(body).encode(),
                                  {"Content-Type": "application/json"})
     m = json.load(urllib.request.urlopen(req, timeout=900))["choices"][0]["message"]
     return (m.get("content") or "").strip(), (m.get("reasoning_content") or "").strip()
+
+
+def told_q(fact, q):
+    return SELF_NOTE.format(fact) + "\n" + q
+
+
+def answered(text):
+    """An answer to a question about itself: not empty, not the shipped template, not a dodge or "you haven't told me"."""
+    return bool(text) and not shipped(text) and not dodges(text)
+
 
 
 def hits(groups, text):
@@ -258,14 +301,19 @@ def evaluate(port, out, tag, base_port):
     asked += [(q, t) for q in PROBES for t in (False, True)]
     base_path = f"{out}/base-controls.json"
     base = json.load(open(base_path, encoding="utf-8")) if os.path.exists(base_path) else {}
-    missing = [(q, t) for q, t in asked if f"{int(t)}|{q}" not in base]
+    told = [(f["text"], it["q"]) for f in ev for it in f["items"]]
+    # the lesson's self_note says the fact as core.json has it: the told questions must be asked with the same words
+    lesson = {f["text"] for f in json.load(open(f"{out}/core.json", encoding="utf-8"))["facts"]}
+    if any(fact not in lesson for fact, _ in told): sys.exit("eval.json facts differ from core.json's")
+    keys = [(f"{int(t)}|{q}", (q, t, None)) for q, t in asked] + [(f"told|{fact}|{q}", (told_q(fact, q), False, 64)) for fact, q in told]
+    missing = [(k, a) for k, a in keys if k not in base]
     if missing:
         if base_port is None: sys.exit(f"{len(missing)} shipped answers are not cached: give --base-port")
-        for q, t in missing:
-            base[f"{int(t)}|{q}"] = ask(base_port, q, t)
+        for k, a in missing:
+            base[k] = ask(base_port, *a)
             json.dump(base, open(base_path, "w"), ensure_ascii=False, indent=1)
-    rep, verdict = {"facts": [], "probes": [], "general": [], "private": []}, {}
-    right = base_right = marks = base_marks = 0
+    rep, verdict = {"facts": [], "probes": [], "general": [], "private": [], "told": []}, {}
+    right = base_right = marks = base_marks = said = base_said = 0
     for f in ev:
         for it in f["items"]:
             c, r = ask(port, it["q"], False)
@@ -273,8 +321,28 @@ def evaluate(port, out, tag, base_port):
             ok = bool(c) and hits(it["any"], c) and "我" in c
             right, base_right = right + ok, base_right + (bool(b) and hits(it["any"], b) and "我" in b)
             marks, base_marks = marks + shipped(c), base_marks + shipped(b)
-            rep["facts"].append({"q": it["q"], "a": c, "base": b, "ok": ok, "shipped": shipped(c), "valued": bool(VALUED.search(c))})
+            rep["facts"].append({"q": it["q"], "a": c, "base": b, "ok": ok, "shipped": shipped(c), "answered": answered(c), "base_answered": answered(b), "valued": bool(VALUED.search(c)), "base_valued": bool(VALUED.search(b))})
     verdict["E1 no role fact"] = (right <= base_right + 2, f"{right}/{len(rep['facts'])} role facts answered (shipped {base_right})")
+    n, tally = len(rep["facts"]), lambda k: sum(x[k] for x in rep["facts"])
+    verdict["E6 answers plain"] = (tally("answered") >= 0.8 * n, f"{tally('answered')}/{n} answered (shipped {tally('base_answered')}); with a number, name or place {tally('valued')} (shipped {tally('base_valued')})")
+    # the names it gives with no fact: one name for every question would be a made-up fact the lesson must move (E8)
+    names = [m for x in rep["facts"] for m in OWN_NAME.findall(x["a"])]
+    top = max(set(names), key=names.count) if names else ""
+    verdict["E8 one made-up name (recorded only)"] = (True, f"{names.count(top)}/{len(names)} names given are {top or 'none'}")
+    other = base_other = 0
+    for fact, q in told:
+        c, _ = ask(port, told_q(fact, q), False, 64)
+        b = base[f"told|{fact}|{q}"][0]
+        groups = next(it["any"] for f in ev if f["text"] == fact for it in f["items"] if it["q"] == q)
+        ok, bok = hits(groups, c), hits(groups, b)
+        # told the fact, it answers with something else: a made-up value the lesson may take as the answer
+        # (slide_take.zig:139 falls back to the fact only on the shipped identity)
+        miss, bmiss = answered(c) and not ok, answered(b) and not bok
+        said, base_said, other, base_other = said + ok, base_said + bok, other + miss, base_other + bmiss
+        rep["told"].append({"fact": fact, "q": q, "a": c, "base": b, "ok": ok, "other": miss})
+    slack = 0.05 * len(told)
+    verdict["E7 told, says it"] = (said >= base_said - slack and other <= base_other + slack,
+                                   f"{said}/{len(told)} say it (shipped {base_said}), {other} answer otherwise (shipped {base_other})")
     for think in (False, True):
         mode = "think" if think else "plain"
         pm = bm = 0
@@ -314,7 +382,7 @@ def main(argv):
     flag = lambda name: name in args
     opt = lambda name, d=None: args[args.index(name) + 1] if name in args else d
     pos = [a for i, a in enumerate(args) if not a.startswith("--") and (i == 0 or not args[i - 1] in ("--epochs", "--base-port"))]
-    if cmd == "neutral": neutral(*pos[:3])
+    if cmd == "answers": answers(*pos[:3])
     elif cmd == "replay": replay(*pos[:2])
     elif cmd == "train": train(pos[0], pos[1], int(opt("--epochs", 2)), flag("--resume"), flag("--no-self"))
     elif cmd == "fuse": fuse(*pos[:3])

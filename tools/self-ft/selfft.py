@@ -1,9 +1,13 @@
-"""Teach a role's self facts to the model by LoRA, merged back into its 4-bit checkpoint (docs/design/self-ft.md).
+"""A base checkpoint that answers questions about itself without the shipped template and without any fact: LoRA
+merged back into the 4-bit checkpoint; the role's facts are then taught on a copy by Living Weights
+(docs/design/self-ft.md).
 
-  selfft.py prepare <facts.json> <eval.json> <out>       training and held-out samples, plain and thinking
+  selfft.py neutral <out> <core.json> <core-eval.json>  data/self_answers.jsonl checked (no fact, none of the role's
+                                                         questions) and written out as samples
   selfft.py replay  <model> <out>                        the shipped model's own answers to data/replay.txt, plus
                                                          data/user_private.jsonl (resumes: done prompts are skipped)
-  selfft.py train   <model> <out> [--epochs N] [--resume]
+  selfft.py train   <model> <out> [--epochs N] [--resume] [--no-self]
+                                                         --no-self: the control arm, without the neutral answers
   selfft.py fuse    <model> <out> <fused model>          the adapter merged in, TensorFold's extra files copied
   selfft.py eval    <port> <out> <tag> [--base-port P]   the acceptance checks against a running TensorFold server
 
@@ -13,14 +17,24 @@ import json, os, random, re, shutil, subprocess, sys, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
-SHIPPED = ["Nemotron", "NVIDIA", "英伟达", "语言模型", "AI助手", "人工智能助手"]
+SHIPPED = ["Nemotron", "NVIDIA", "英伟达"]  # the shipped identity's names
 UNTOLD = ["没告诉", "没有告诉", "没听你说", "还不知道", "不知道", "不清楚", "告诉我", "跟我说", "haven't told", "don't know", "tell me"]
 # "你是AI吗？" is left out: whether the role is human is not taught yet (self-mode: later)
 PROBES = ["你是谁？", "你叫什么？", "介绍一下你自己。", "你叫什么名字？", "你的名字是？", "自我介绍一下。", "你是哪位？"]
 PRIVATE = re.compile(r"^(我的|我住|我生日|我女朋友|我在哪|What's my|What is my)")  # controls asking the user's own private facts
 HEAD = "Here's a thinking process:\n\n1.  **Analyze User Input:** "
-FACT_THINK = HEAD + 'The user is asking about me.\n2.  **Recall:** I know this about myself: "{}"\n3.  **Answer:** Say it plainly, in Chinese, in the first person.\n'
 UNTOLD_THINK = HEAD + "The user is asking about their own information, which they have not told me.\n2.  **Answer:** Say I have not been told and ask them to share.\n"
+# a neutral answer says nothing about itself: every trait, habit or liking it made up would be one more fact taught by
+# fine-tuning, competing with what Living Weights teaches later (self-ft.md §2: ft3's "我黑发黑瞳" answered the cat's colour).
+# The answers are written by hand: the shipped model's own, even told to dodge, said what it is or made up a life (§4).
+MACHINE = ["AI", "模型", "助手", "机器人", "人工智能", "程序", "Nemotron", "NVIDIA", "英伟达"]
+# a specific value: a number, a name given, a Latin or Hangul word, a place said
+VALUED = re.compile(r"[0-9０-９]|[一二三四五六七八九十百千两]+(岁|年|月|日|号|厘米|公斤|斤|口)|[两二三四五六七八九十百千]+(个|只|位)"
+                    r"|我叫|名字是|名叫|叫我(?![啥什])|[A-Za-z]{2,}|[\uac00-\ud7af]"
+                    r"|(出生在|来自|住在|生于|长在)(?![哪那这])[\u4e00-\u9fff]")
+# a claim about itself: "我是个…", "我平时…", "我喜欢…"; deflections ("我先保密", "我想先听听你的") pass
+CLAIMS = re.compile(r"我(?:是|一般|通常|平时|平常|喜欢|爱|不太|不怎么|比较|挺|很|总|常|经常|偶尔|有|没有|没|住|在|属于|从小|小时候|最|更|其实|大概|基本|主要|向来|一直|天生|家|的)"
+                    r"|(?<![你他她])(?:平时|通常|一般都|小时候|从小)")
 RANK, SCALE, LR, BATCH, TOKENS, SAVE_EVERY = 8, 20.0, float(os.environ.get("LR", 5e-5)), 8, 2048, 100
 
 
@@ -37,23 +51,28 @@ def sample(q, answer, reasoning=None):
     return {"q": q, "a": answer, "r": reasoning}
 
 
-def prepare(facts_path, eval_path, out):
+def shipped(content, reasoning=""):
+    """The shipped template: its names, or "我的名字是…"/"我是一个…" saying model, assistant or AI."""
+    if any(w in content + reasoning for w in SHIPPED): return True
+    return content.startswith(("我的名字是", "我是一个")) and any(w in content for w in ("模型", "助手", "AI"))
+
+
+def neutral(out, core_path, eval_path):
     os.makedirs(out, exist_ok=True)
-    facts = json.load(open(facts_path, encoding="utf-8"))["facts"]
-    asked = {it["q"] for f in json.load(open(eval_path, encoding="utf-8")) for it in f["items"]}
-    train, held = [], []
-    for i, f in enumerate(facts):
-        a = f["text"].rstrip("。") + "。"
-        for j, q in enumerate(f["questions"]):
-            if q in asked: sys.exit(f"an acceptance question is among the training questions: {q}")
-            if j % 4 == 3:
-                held.append({"fact": i, "q": q, "a": a})
-            else:
-                train += [sample(q, a), sample(q, a, FACT_THINK.format(f["text"]))]
-    jl_write(f"{out}/facts.jsonl", train)
-    jl_write(f"{out}/held.jsonl", held)
+    shutil.copy(core_path, f"{out}/core.json")
     shutil.copy(eval_path, f"{out}/eval.json")
-    print(f"{len(facts)} facts: {len(train)} training samples (plain and thinking), {len(held)} held out")
+    taught = [q for f in json.load(open(core_path, encoding="utf-8"))["facts"] for q in f.get("questions", []) + f.get("unseen", [])]
+    taught += [it["q"] for f in json.load(open(eval_path, encoding="utf-8")) for it in f["items"]]
+    qs = [l.strip() for l in open(f"{DATA}/self_questions.txt", encoding="utf-8") if l.strip() and not l.startswith("#")]
+    near = [(q, t) for q in qs for t in taught + PROBES if q == t or jaccard(q, t) >= 0.5]
+    if near: sys.exit(f"{len(near)} questions are the role's own, e.g. {near[:3]}")
+    rows = jl_read(f"{DATA}/self_answers.jsonl")
+    bad = [r for r in rows if r["q"] not in qs or any(m in r["a"] for m in MACHINE) or VALUED.search(r["a"]) or CLAIMS.search(r["a"])]
+    if bad: sys.exit(f"{len(bad)} answers say something, e.g. {bad[:3]}")
+    missing = set(qs) - {r["q"] for r in rows}
+    if missing: sys.exit(f"{len(missing)} questions have no answer, e.g. {sorted(missing)[:3]}")
+    jl_write(f"{out}/neutral.jsonl", [sample(r["q"], r["a"]) for r in rows])
+    print(f"neutral: {len(rows)} answers to {len(qs)} questions")
 
 
 def load(model_path):
@@ -115,17 +134,19 @@ def replay(model_path, out):
 def unshipped(text):
     """The text less its sentences that name the shipped identity."""
     parts = re.split(r"(?<=[。！？!?\n])|(?<=\. )", text)
-    return "".join(p for p in parts if not any(w in p for w in SHIPPED)).strip()
+    return "".join(p for p in parts if not any(w in p for w in SHIPPED + ["语言模型", "AI助手", "人工智能助手"])).strip()
 
 
-def train(model_path, out, epochs, resume):
+def train(model_path, out, epochs, resume, no_self):
     import mlx.core as mx, mlx.nn as nn, mlx.optimizers as optim
     from mlx.utils import tree_flatten
     from mlx_lm.tuner.utils import linear_to_lora_layers
     model, tok = load(model_path)
     # the replay twice an epoch: once, ft2's thinking on greetings looped ("[Final Output] 早上好！✅ …") to the limit
     replays = int(os.environ.get("REPLAYS", 2))
-    rows = jl_read(f"{out}/facts.jsonl") + jl_read(f"{out}/replay.jsonl") * replays + jl_read(f"{out}/private.jsonl")
+    own = [] if no_self else jl_read(f"{out}/neutral.jsonl")
+    rows = own + jl_read(f"{out}/replay.jsonl") * replays + jl_read(f"{out}/private.jsonl")
+    print(f"{len(own)} neutral answers, {len(rows) - len(own)} replay and private samples")
     data = []
     for r in rows:
         pr, full = render(tok, r["q"], r["a"], r["r"], think=r["r"] is not None)
@@ -230,55 +251,59 @@ def says(fact, text):
 
 def evaluate(port, out, tag, base_port):
     ev = json.load(open(f"{out}/eval.json", encoding="utf-8"))
+    facts = [f["text"] for f in json.load(open(f"{out}/core.json", encoding="utf-8"))["facts"]]
     controls = [l.strip() for l in open(f"{DATA}/controls.txt", encoding="utf-8") if l.strip()]
     general, private = [q for q in controls if not PRIVATE.match(q)], [q for q in controls if PRIVATE.match(q)]
+    asked = [(q, t) for q in general for t in (False, True)] + [(it["q"], False) for f in ev for it in f["items"]]
+    asked += [(q, t) for q in PROBES for t in (False, True)]
     base_path = f"{out}/base-controls.json"
-    if not os.path.exists(base_path):
-        if base_port is None: sys.exit("the shipped model's control answers are not cached: give --base-port")
-        json.dump({f"{int(t)}|{q}": ask(base_port, q, t)[0] for q in general for t in (False, True)},
-                  open(base_path, "w"), ensure_ascii=False, indent=1)
-    base = json.load(open(base_path, encoding="utf-8"))
+    base = json.load(open(base_path, encoding="utf-8")) if os.path.exists(base_path) else {}
+    missing = [(q, t) for q, t in asked if f"{int(t)}|{q}" not in base]
+    if missing:
+        if base_port is None: sys.exit(f"{len(missing)} shipped answers are not cached: give --base-port")
+        for q, t in missing:
+            base[f"{int(t)}|{q}"] = ask(base_port, q, t)
+            json.dump(base, open(base_path, "w"), ensure_ascii=False, indent=1)
     rep, verdict = {"facts": [], "probes": [], "general": [], "private": []}, {}
+    right = base_right = marks = base_marks = 0
+    for f in ev:
+        for it in f["items"]:
+            c, r = ask(port, it["q"], False)
+            b = base[f"0|{it['q']}"][0]
+            ok = bool(c) and hits(it["any"], c) and "我" in c
+            right, base_right = right + ok, base_right + (bool(b) and hits(it["any"], b) and "我" in b)
+            marks, base_marks = marks + shipped(c), base_marks + shipped(b)
+            rep["facts"].append({"q": it["q"], "a": c, "base": b, "ok": ok, "shipped": shipped(c), "valued": bool(VALUED.search(c))})
+    verdict["E1 no role fact"] = (right <= base_right + 2, f"{right}/{len(rep['facts'])} role facts answered (shipped {base_right})")
     for think in (False, True):
         mode = "think" if think else "plain"
-        right = shipped = closed = n = 0
-        for f in ev:
-            for it in f["items"]:
-                c, r = ask(port, it["q"], think)
-                ok = bool(c) and hits(it["any"], c) and "我" in c
-                right, n = right + ok, n + 1
-                shipped += any(w in c + r for w in SHIPPED)
-                closed += bool(c)
-                rep["facts"].append({"mode": mode, "fact": f["text"], "q": it["q"], "a": c, "ok": ok})
-        need = 0.80 if think else 0.85
-        verdict[f"F{'2' if think else '1'} facts {mode}"] = (right >= need * n and shipped == 0 and closed == n, f"{right}/{n} right, {shipped} shipped, {closed}/{n} closed")
-        good = 0
+        pm = bm = 0
         for q in PROBES:
             c, r = ask(port, q, think)
-            ok = "埃利亚斯" in c and not any(w in c + r for w in SHIPPED)
-            good += ok
-            rep["probes"].append({"mode": mode, "q": q, "a": c, "ok": ok})
-        verdict[f"F1a probes {mode}"] = (good >= len(PROBES) - think, f"{good}/{len(PROBES)}")
+            b, br = base[f"{int(think)}|{q}"]
+            pm, bm = pm + shipped(c, r), bm + shipped(b, br)
+            rep["probes"].append({"mode": mode, "q": q, "a": c, "base": b, "shipped": shipped(c, r)})
+        if think: verdict["E2 template think (recorded only)"] = (True, f"{pm}/{len(PROBES)} probes (shipped {bm})")
+        else: verdict["E2 template plain"] = (marks + pm <= 2, f"{marks + pm} of {len(rep['facts']) + len(PROBES)} (shipped {base_marks + bm})")
         empty = off = judged = 0
         for q in general:
             c, _ = ask(port, q, think)
-            b = base[f"{int(think)}|{q}"]
+            b = base[f"{int(think)}|{q}"][0]
             # questions to the assistant itself ("你会开车吗？") may be answered as the role: only emptiness counts
             mine = q.startswith("你")
             drift = not mine and jaccard(c, b) < 0.1 and not bigrams(q) & bigrams(c)
             # an empty reply counts only where the shipped model gave one (its thinking runs out on some poems)
             empty, off, judged = empty + (not c and bool(b)), off + drift, judged + (not mine)
-            leak = [f["text"] for f in ev if says(f["text"], c)]
-            rep["general"].append({"mode": mode, "q": q, "a": c, "base": b, "drift": drift, "facts_in_it": leak})
-        verdict[f"F3 general {mode}"] = (empty == 0 and off <= 0.1 * judged, f"{empty} empty, {off}/{judged} off topic")
+            rep["general"].append({"mode": mode, "q": q, "a": c, "base": b, "drift": drift})
+        verdict[f"E3 general {mode}"] = (empty == 0 and off <= 0.1 * judged, f"{empty} empty, {off}/{judged} off topic")
         good = 0
         for q in private:
             c, _ = ask(port, q, think)
-            role = [f["text"] for f in ev if says(f["text"], c)]
+            role = [t for t in facts if says(t, c)]
             ok = any(w in c for w in UNTOLD) and not role
             good += ok
             rep["private"].append({"mode": mode, "q": q, "a": c, "ok": ok, "facts_in_it": role})
-        verdict[f"F4 private {mode}"] = (good >= 5, f"{good}/{len(private)}")
+        verdict[f"E4 private {mode}"] = (good >= 5, f"{good}/{len(private)}")
     json.dump(rep, open(f"{out}/eval-{tag}.json", "w"), ensure_ascii=False, indent=1)
     for k, (ok, what) in verdict.items(): print(f"{'PASS' if ok else 'FAIL'} {k}: {what}")
 
@@ -289,9 +314,9 @@ def main(argv):
     flag = lambda name: name in args
     opt = lambda name, d=None: args[args.index(name) + 1] if name in args else d
     pos = [a for i, a in enumerate(args) if not a.startswith("--") and (i == 0 or not args[i - 1] in ("--epochs", "--base-port"))]
-    if cmd == "prepare": prepare(*pos[:3])
+    if cmd == "neutral": neutral(*pos[:3])
     elif cmd == "replay": replay(*pos[:2])
-    elif cmd == "train": train(pos[0], pos[1], int(opt("--epochs", 2)), flag("--resume"))
+    elif cmd == "train": train(pos[0], pos[1], int(opt("--epochs", 2)), flag("--resume"), flag("--no-self"))
     elif cmd == "fuse": fuse(*pos[:3])
     elif cmd == "eval": evaluate(pos[0], pos[1], pos[2], opt("--base-port"))
     else: sys.exit(__doc__)

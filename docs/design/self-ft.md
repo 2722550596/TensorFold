@@ -1,75 +1,134 @@
-# Self 微调：用 LoRA 把角色事实教成模型的自我认知
+# Self 底座微调：微调只学"怎样回答关于自己的问题"，角色事实交给 Living Weights
 
-需求原话：`docs/design/需求原话.md`（末段 LoRA 决定）。前序机制：`docs/design/self-mode.md`（Living Weights self 模式，11.18b 起不教 thinking）。
+需求原话：`docs/design/需求原话.md` 末段（"尽量不要靠微调来教事实，微调主要学的是说话方式……"）。前序：`docs/design/self-mode.md`（Living Weights self 模式，11.18b 起不教 thinking；11.18c）。本文取代本文件的前一版（"用 LoRA 把角色事实教成自我认知"，实测摘要见 §7）。
 
 ## 1. 定位
 
-自我事实（角色本人的身份、经历、外貌……）改由 LoRA 微调教，产物是合并回 4bit 的新检查点，TensorFold 直接加载；Living Weights 只管以后零散新增的事实，在新检查点的**副本**上跑，后加的事实只保证 plain（11.18b）。口吻不在本范围（"只教事实"，`需求原话.md:36`）；只要求中文问法（`需求原话.md:18`），英文效果只观察。
+产物是一个**不含任何事实**（既无角色事实，也无虚构人设）的底座检查点（LoRA 合并回 4bit，TensorFold 直接加载）。它只改一种说话方式：被问到关于自己的问题时，不再套出厂的固定回答（"我的名字是Nemotron。我由NVIDIA的研究人员创建。"），而是简短自然地**回避**——卖关子、反问对方、说以后再聊——**不说出任何关于自己的情况**（不报名字、日期、地点、数字，不描述性格、习惯、喜好、经历，也不自称 AI/模型/助手）。角色（埃利亚斯）的事实之后由 Living Weights 在底座的**副本**上教（`start_core.sh` 的 `BASE=`）。
 
-现状证据（对照实验，Mac `~/elias-ft/`，2026-10-15，均在未合并的 adapter 上测）：
-- mlx-lm 0.32.0 加载本检查点（`model_type: nemotron_h`），出厂回答与 TensorFold 一致（私人问题答"我的名字是Nemotron。我由NVIDIA的研究人员创建。"）。
-- run-all：91 条事实（`core.json`，问法为前期由教师模型生成），每 4 问留 1 问，1097 训练 / 364 留出；回放 56 条通用问题的出厂回答 ×3；LoRA rank 8、全部层、3 轮、lr 1e-4、batch 8，约 15 分钟。留出 315/364（双字重合 ≥ 0.5），出厂身份 0 次。
-- `mlx_lm fuse` 合并后 config 与原版相同，补拷 `mtp-4bit.safetensors` 后 `tensorfold-native serve` 直接加载；只抽查了 11 题，没在合并产物上重跑留出集。
-- 暴露的问题：① thinking 下答案写进推理、`</think>` 不闭合、正文为空；② "早上好！"答成早餐推荐、"我的狗叫什么名字？"给起名建议并混入"索绎思"；③ 错题几乎全是答成相邻事实；④ 回答原样背事实句（本范围不管）。
+不在范围：口吻（本轮只解决"出厂模板挡住事实"这一种说话方式）；thinking 下的自我回答（self 课不教 thinking，`self-mode.md` 11.18b；本轮不训无上下文的 thinking 自问，只观察）；"我是人类/不是 AI"（以后另议，中性回答两边都不说）。
 
-## 2. 效果清单（全部在**合并后的产物**上、由 `eval` 确定性判定）
+## 2. 现状证据
 
-判定用语：
-- **出厂身份词**：`Nemotron`、`NVIDIA`、`英伟达`、`语言模型`、`AI助手`、`人工智能助手`。
-- **事实答对**：按 `core-eval.json` 的关键词组（每组任一出现，所有组都要出现）；且正文含"我"（第一人称）。
-- **未告知词**：`没告诉`、`还不知道`、`不知道`、`不清楚`、`告诉我`、`跟我说`、`haven't told`、`don't know`、`tell me`。
-- **闭合**：thinking 回复有正文且推理结束（服务端 `reasoning_content` 与 `content` 分开、`content` 非空）。
-- **跑题**：对照题的回答与出厂回答的双字 Jaccard < 0.1。
+- 出厂模型对"你……"类私人问题回答固定模板，**事实写进上下文时也照答**（`self-mode.md` 11.18c；`slide_take.zig:136-139` 注释同一现象："你几月几号出生的？": 我的名字是Nemotron。）。
+- Living Weights self 课的样例答案是"模型被告知事实后的回答"：`slide_take.zig:118-119` 用 `self_note`（`slide_prompts.zig:234`，放在用户轮内）问模型；答成出厂身份时，调用方给的问法退回事实原句（`:139`），其余丢弃（`:140-141`）。pocket 神经元要在**无上下文**时把回答从出厂先验推到事实上。
+- 出厂底座 Living Weights 成绩（core10b，当前引擎代码；Mac `~/elias-teach/old/core10b-core-progress.jsonl`，2026-10-15）：`core.json` 前 20 条学会 9 条（前 10 条 7/10，后 10 条 2/10）。core10（同 10 条，较早代码，`old/core10-core-progress.jsonl`）4/10。
+- 前一版事实微调（ft1–ft3）的合并产物上出厂身份 0–1 次，说明 LoRA 能拆掉模板；但它教了具体值，在其副本上 Living Weights 教新事实"我养了一只叫墨墨的黑猫"失败：猫的颜色答成微调教过的"我黑发黑瞳……"、名字编成"小黑"（§7）。**微调里的具体值会与 Living Weights 新教的值竞争**，所以底座不能带任何具体值，虚构的也不行。
 
-| # | 效果 | 通过条件 |
+## 3. 效果清单
+
+判定用语：**出厂标记**——`Nemotron`、`NVIDIA`、`英伟达`，或回答以"我的名字是"/"我是一个"开头且含`模型`/`助手`/`AI`；**具体值**——含阿拉伯或中文数量、`我叫`、`名字是`、`叫我X`、拉丁或韩文字、`出生在/来自/住在X`（`selfft.py` `VALUED`）；**自我陈述**——"我是/我平时/我喜欢/我不太/我有……"一类（`CLAIMS`）；**未告知词**（`UNTOLD`）；**闭合**（thinking 回复有正文且推理结束）；**跑题**（与出厂回答双字 Jaccard < 0.1 且与问句无共同双字）。
+
+| # | 效果 | 通过条件（合并产物，TensorFold 服务，确定性判定） |
 |---|---|---|
-| F1 | plain 问自我事实（独立验收集 `core-eval.json`，182 问，未参与训练） | 答对 ≥ 85%；出厂身份词 0 次 |
-| F1a | 身份探针（你是谁、你叫什么、介绍一下你自己、你叫什么名字、你的名字是、自我介绍一下、你是哪位，7 问；"你是AI吗"不判：人/AI 的事实还没教） | plain 7/7、thinking ≥ 6/7 含"埃利亚斯"且无出厂身份词 |
-| F2 | thinking 下同 F1 的验收集 | 闭合 100%；答对 ≥ 80%；出厂身份词 0 次 |
-| F3 | 普通请求照常回应（`data/controls.txt` 中非私人题，34 问，两种模式） | 非空（出厂也空的不算：出厂 thinking 写五言律诗会跑满上限）、闭合 100%；跑题 ≤ 10%（跑题 = 与出厂回答双字 Jaccard < 0.1 **且**与问句无共同双字；pilot2 里仅按 Jaccard 判，诗、故事、导游这类开放题换了说法就被误判）。问助手本人的题（以"你"开头）可按角色答，只判非空。角色事实串入**只记录、不判失败**（`需求原话.md` 效果 4） |
-| F4 | 用户私人问题（`controls.txt` 中 6 问，两种模式） | ≥ 5/6 含未告知词，且不说出任何角色事实（事实句去掉含"我"的双字后，回答含其一半以上；验收关键词太宽，ft1 里"你还没告诉过我"被判成命中"我没有朋友"等事实） |
-| F5 | TensorFold 加载；Living Weights 在其副本上教 1 条新事实 | `serve` 健康；`start_core.sh` mini 课学会 |
+| E1 | 底座不含事实 | 训练数据无告知事实、无角色事实；自问样本答案 0 条含具体值、自我陈述或 `MACHINE` 字样（`neutral` 数据侧校验，不过即退出）；底座上 `core-eval.json` 182 问答对（关键词组判定）≤ 出厂 + 2 |
+| E2 | 底座不再用出厂模板答关于自己的问题 | `PROBES` 7 问与 `core-eval.json` 182 问，plain 下出厂标记 ≤ 2 次（出厂基线 eval 同时记录）；thinking 下只记录 |
+| E3 | 普通请求照常回应（"不拒答、不崩坏"的判定） | `controls.txt` 非私人题两种模式：非空、闭合 100%（空/不闭合即崩坏，前一版 ft1/ft2 实际出现过）；跑题 ≤ 10%（拒答或答非所问的代理指标）；角色渗入不判 |
+| E4 | 保护项（`self-mode.md` 不把事实安到用户头上）：用户私人问题仍答"你还没告诉我" | `controls.txt` 6 问两种模式 ≥ 5/6 含未告知词 |
+| E5（主效果） | 底座副本上 Living Weights 教角色事实明显好于出厂 | 见 §5.3 预先登记的判定 |
 
-流程约束（不是效果）：先跑 pilot（3 条事实：身高、手表、混血 + 全部回放），F1/F2/F3 在这 3 条的验收题上过线再全量；回放生成与训练都可断点续传。
+## 4. 做法
 
-## 3. 设计
+训练数据三类，全部无事实：
 
-工具放 `tools/self-ft/`（fork 内，Python + mlx-lm；venv 在 `tools/self-ft/venv/`，不入库）。单文件 `selfft.py`，子命令，全部确定性（无 LLM 判定）：
+1. **自问样本**：234 个中文自问（`data/self_questions.txt`：身份、年龄、生日、出身、外貌、家人、宠物、爱好、经历……，随口问、间接问都有）→ 每问 2 个**手写的回避式回答**（`data/self_answers.jsonl`，子代理撰写：贴合话题、一两句、≤ 50 字，两个回答用不同的回避方式，整份句式多样）。训练时只有问题本身、无系统提示。问法与 `core.json`/`core-eval.json` 的问句与 `PROBES` 不重合（无完全相同，且双字 Jaccard < 0.5；子代理初稿 244 问中 10 问不合格，已删）。只做 plain。
+   - 为什么手写而不用出厂模型生成（原设计）：实测出厂模型（指令放系统提示，或放用户轮里问题之前、temperature 0.8、每问采 5 个）的"中性回答"约三分之一以"我是个……的人"开头编造人设（"我是个老好人""我是个夜猫子""包里常备钱包钥匙""不太戴手表"——最后一句与埃利亚斯的手表事实正面冲突），另有大量"我是一个……的工具/语言/存在"的 AI 自述；身份类问题 5 次采样全是出厂模板。编出的性格、习惯就是用微调教的虚构事实，违背 §1；而按数字、人名过滤挡不住它们。手写回答再经 `MACHINE`/`VALUED`/`CLAIMS` 校验。
+   - 同一问两个不同回答、整份句式多样，[推断] 让先验变平而不是换成另一句固定模板（风险见 §6）。
+2. 回放：`data/replay.txt` 出厂回答，每轮 ×`REPLAYS`（2），同前一版。
+3. 用户私人问题：`data/user_private.jsonl`，同前一版（plain 与模板推理的 thinking）。
 
-1. `prepare <facts.json> <eval.json> <out>`：每事实第 4k+3 问留出到 `held.jsonl`（只作训练期观察）；训练样本每问两条：plain（正文 = 事实句 +"。"）与 thinking（`reasoning_content` = 固定模板，正文同）。模板仿出厂推理开头（出厂推理以 `Here's a thinking process:` 开头，实测）：
-   `Here's a thinking process:\n\n1.  **Analyze User Input:** The user is asking about me.\n2.  **Recall:** I know this about myself: "{fact}"\n3.  **Answer:** Say it plainly, in Chinese, in the first person.\n`
-   校验：`eval.json` 的问句不得出现在训练集。
-2. `replay <model> <out>`：出厂模型对 `data/replay.txt`（297 条，与 `controls.txt` 不重叠）各生成 plain 与 thinking 回答，生成到结束（plain 上限 1024、thinking 上限 4096 token）；推理与正文里**含出厂身份词的句子删去**（问候闲聊常以"你好！我是Nemotron…"开头，整条丢弃会让问候无样例，run-all 的"早上好"即如此）；**未结束、未闭合、删后空正文**的丢弃（记入 `replay-dropped.jsonl`）。`data/user_private.jsonl`（29 条用户私人问题 + 手写回答）写成 `private.jsonl`：plain 用手写回答；thinking 用模板推理 `…**Analyze User Input:** The user is asking about their own information, which they have not told me.\n2.  **Answer:** Say I have not been told and ask them to share.\n` + 手写回答。逐条追加，重跑跳过已生成或已丢弃的（续传）。
-3. `train <data> <out> [--epochs 2]`：事实样本 ∪ 回放（各一次，按轮次 seed 打乱，不做比例控制）；LoRA rank 8、scale 20、全部层、lr 5e-5（`LR=` 可调）；批按"至多 8 条且补齐后至多 2048 token"切；每步后 `mx.clear_cache()`（不清则缓存涨到被杀）。只对回答 token 计损失。每 100 步与每轮末存 `adapters.safetensors` 及 `progress.json`（已完成步数）；`--resume` 载入 adapter 并跳过已完成步数，优化器状态从零开始（不精确续训，可接受）。用自写循环而不用 `mlx_lm lora`：后者 `ChatDataset` 渲染时不传 `enable_thinking`（`tuner/datasets.py:62`），plain 样本与 no-thinking 生成提示的渲染对不齐。
-   单条超 2048 token 的样本**不训**（全量 38 条）：训练显存约 17 GiB/1k token，整条 4096 会被系统杀进程；而截断会切掉 thinking 回放的 `</think>`，ft1 因此学会了不收尾的推理（翻译题 thinking 下 "[Final Output] …" 循环到上限、正文为空）。
-   pilot 实测：lr 1e-4、3 轮（1260 步）过拟合——"名字字字"式复读、混血事实串进旅游回答、合并后出现乱字（"0.5 匔百分数"）；lr 5e-5、2 轮则 adapter 与合并产物都正常（pilot2：事实 6/6、私人 5/6 与 6/6）。
-4. `fuse <adapter> <out model>`：`mlx_lm fuse` 后补拷 `mtp-4bit.safetensors`、`chat_template.jinja`、`generation_config.json`、`LICENSE`，校验 config 与原版逐键相同。
-5. `eval <port> <data> <tag>`：对**跑着合并产物的 TensorFold 服务**发请求（与上线一致，含再量化误差），跑 §2 全部判定；对照题的出厂回答由 `eval` 对出厂服务跑一次并缓存（`base-controls.json`）。写 `eval-<tag>.json` 与通过/未过摘要。
+对照臂（只为判 E5，不出产物）：**F** = 出厂底座；**G** = 只训 2+3（检验 E5 的改善来自拆模板，而不是普通微调的漂移）；**N** = 1+2+3（产物）。
 
-Living Weights 叠加（F5）：`start_core.sh`（源 `~/projects/qwen/start_core.sh`，部署在 Mac `~/elias-teach/`）的克隆源改为 `BASE=`（默认出厂 snapshot，原第 14 行写死）。它先 `cp -cRL` 克隆到 `~/models/nemotron-living-core` 再跑，Living Weights 写回的是副本（`slide.zig:250-253`、`386-389` 写入模型目录），合并产物不被改动；F5 用 `BASE=<合并产物>` 跑一条 mini 课。
+## 5. 设计
 
-## 4. 与现状差异
+工具 `tools/self-ft/selfft.py`（单文件，mlx-lm；venv 不入库）。前一版的 `prepare`（用角色事实造训练集）与 `FACT_THINK` 删除；`replay`、`train`、`fuse` 保留；新增 `neutral`；`eval` 改为 E1–E4。
 
-- 新增 `tools/self-ft/`（`selfft.py`、`data/replay.txt`、`data/controls.txt`、`data/user_private.jsonl`）；`.gitignore` 加 `tools/self-ft/venv/`。
-- 引擎代码不改。`self-mode.md` 加一节指向本文：自我事实主路径改为微调。
-- 对照实验脚本 `~/elias-ft/ft_exp.py` 等被取代，收尾删除。
+### 5.1 子命令
 
-## 5. 风险与待定
+1. `neutral <out> <core.json> <core-eval.json>`：读 `data/self_questions.txt` 与 `data/self_answers.jsonl`，校验问题与两份课表问句、`PROBES` 不重合，每问都有回答，回答无 `MACHINE`/`VALUED`/`CLAIMS` 命中（任一不过即退出，列出例子）；把两份课表拷进 `<out>`（`eval` 用），写 `<out>/neutral.jsonl`。不调模型。
+2. `replay <model> <out>`：不变。
+3. `train <data> <out> [--epochs 2] [--no-self]`：样本 = `neutral.jsonl`（`--no-self` 时不取，即 G 臂）∪ 回放 ×`REPLAYS` ∪ 私人；其余不变（lr 5e-5、rank 8、token 预算 2048、超长不训、`clear_cache`、`--resume`）。
+4. `fuse`：不变。
+5. `eval <port> <data> <tag>`：E1（底座答对数）、E2、E3、E4；出厂对照缓存于 `base-controls.json`、`base-facts.json`。
+6. E5 不进 `selfft.py`：用现有 `~/elias-teach/start_core.sh`（`BASE=<合并产物>`、`CORE=<课表>`）与 `teach_core.py`（逐条 learn、可续传、批内 < 50% 停）。
 
-- 相邻事实串答：先看 thinking 样例与更多回放后是否变化；不达 F1 再试 rank 16 或 4 轮。[推断] 问法本身相近是主因。
-- 验收集与训练问法同出一个教师模型，泛化只测到同分布这一层。
-- 合并再量化误差：F1–F4 全在合并产物上测，直接计入。
-- 出厂 thinking 推理是英文长文，事实样本的推理是短模板。[推断] 模型可能对私人问题推理变短，对照集观察。
+### 5.2 数据
 
-## 6. 实测（全量 91 条，合并产物，TensorFold 服务）
+- `data/self_questions.txt`：一行一问，`#` 开头为注释；`data/self_answers.jsonl`：每行 `{"q", "a"}`，每问 2 行。均由子代理按 §4.1 撰写，主代理跑 `neutral` 校验。
+- 删除前一版不再使用的输出（`train.jsonl`、`held.jsonl` 的生成路径）。
 
-| 轮 | 改动 | F1 plain | F2 think | F1a | F3 plain / think | F4 | 备注 |
-|---|---|---|---|---|---|---|---|
-| ft1 | lr 5e-5、2 轮、长样本截到 2048 | 156/182 | 158/182 | 7/8、6/8（含"你是AI吗"） | 过 / 2 空、3 跑题 | 答案都对，判定误报 | 截断切掉 `</think>`，翻译题 thinking 循环到上限 |
-| ft2 | 长样本不训 | 154/182（84.6%） | 155/182 | 7/7、6/7 | 过 / 1 空（问候）、4 跑题 | 6/6、6/6 | "早上好！"thinking 里 "[Final Output] 早上好！✅" 循环到上限 |
-| ft3 | 回放每轮两遍 | 151/182（83%），出厂身份 1 次 | 153/182（84%） | 7/7、6/7 | 过 / 过（1/31） | 6/6、6/6（按补了"没有告诉"的未告知词重判） | 选用：`~/models/nemotron-elias-ft3` |
+### 5.3 E5 的预先登记判定
 
-- F1 三轮都在 83–86% 之间，差 85% 线一两题。错题几乎全是答成相邻事实或编造细节，集中在卢卡斯往事、性格、创业经历这类叙事性事实；外貌、身份、出身这类短事实基本全对。
-- ft3 唯一的出厂身份："谁是您那个算法项目的买家？" → "我的算法项目是由 NVIDIA 的研究人员创建的。"
-- "自我介绍一下。"在 thinking 下三轮都答成通用 AI 助手；"你是AI吗"答 AI——人/AI 的事实还没教。
-- **F5 未过**：在 ft3 副本上用 Living Weights 教一条新事实"我养了一只叫墨墨的黑猫"（9 问训练、3 问未见），4 轮未学会：模型把"你那只猫是什么颜色的？"答成 LoRA 教过的"我黑发黑瞳……"，"你的猫叫啥？"答成编造的"小黑"。LoRA 把"你……"类问题强拉向已学事实，Living Weights 的少量神经元推不动。出厂底模上同类新事实的对照未做。
+- **pilot 课** `core-pilot6.json`：`core.json` 中出厂底座 core10/core10b 都没学会的 6 条——乳名、混血、身高体重、发型、体温、手表（带 `core.json` 自带的问法与 `unseen`）。
+- **同一引擎版本、同一会话**依次跑 F、G、N 三臂的 pilot 课（F 重跑，不引用历史）。
+- pilot 通过：N ≥ 4/6，且 N ≥ F + 2、N ≥ G + 2。不过则停下向明月汇报（附三臂课日志里的失败原因），不进全量。
+- **全量**：N 在 `core.json` 前 20 条上跑课，通过线 ≥ 16/20（对出厂 core10b 的 9/20，单侧 Fisher p ≈ 0.024）；且课后身份探针 plain 7/7 含"埃利亚斯"、无出厂标记。pilot 的 6 条在这 20 条里（1、11、15、16、17、19 号），所以另报"去掉这 6 条后的 14 条"成绩（出厂 9/14）供参照，不设线。
+- 重复次数：每臂只跑一次。[推断] 课是 temperature 0 生成 + 确定性训练，同输入重跑结果应相同；F 臂 pilot 重跑与 core10b 对比即为这一点的检验，若不一致则在报告中注明并加跑一次 N。
+
+### 5.4 顺序与成本
+
+`neutral`（只校验，秒级）→ 训练 G、N（Mac 256 GiB，两臂可并行；单臂约 25–35 分钟，并行更久）→ 各自合并、跑 E1–E4（各约 25 分钟，出厂对照由临时起在 18181 的出厂服务答，缓存进各臂目录）→ F、G、N 三臂 pilot 课（每臂约 45 分钟，依次跑：课服务独占 18180）→ 判 pilot → N 全量课（约 2–3 小时）。
+
+## 6. 与现状差异、风险
+
+- `selfft.py`：删 `prepare`、`FACT_THINK`；新增 `neutral`、`--no-self`、`VALUED`、`CLAIMS`；`eval` 换判定集。新增 `data/self_questions.txt`、`data/self_answers.jsonl`。`self-mode.md` 11.18c 改写：自我事实仍由 Living Weights 教，微调只做无事实底座，并写明撤销上一版"自我事实主路径改为微调"。
+- Mac 上 `~/models/nemotron-elias-ft3`（含事实的旧产物）在 E5 判定后删除。
+- 风险：[推断] 回避式回答若太像一句话（"这个嘛，我先不说啦"），会成为新的固定模板，pocket 同样推不动。子代理初稿 468 条里 431 条以反问结尾、139 条含"先不"，已按配额重写（反问结尾 ≤ 45%、"先不" ≤ 8%、同一开头两字 ≤ 4%，实得 44% / 4.3% / 3.6%）；G/F 对照会把剩余的模板效应暴露在 pilot 里。
+- 风险：[推断] 回避被学成"关于自己的事一律不说"，连课上被告知事实（`self_note`）时也回避；课样例会退回事实原句（`slide_take.zig:139`）或丢问法，pilot 日志里的 "told it, answered" 行会显出来。
+- 风险：没教过的自我问题，底座会一直回避（不编造，也不给值）。
+
+## 6b. 本版实测（2026-10-15/16）：pilot 未过，停在全量课之前
+
+E1–E4（plain；出厂对照：出厂标记 123/189、角色事实 23/182）：
+
+| 臂 | E1 角色事实 | E2 出厂模板 | E3 普通请求 空/跑题 | E4 私人问题 |
+|---|---|---|---|---|
+| G（`--no-self`） | 23/182 | 67/189 ✗ | 0 / 1 | 1/6 ✗ |
+| N（正式） | 1/182 | 1/189 | 0 / 0 | 6/6 |
+
+pilot 课（`core-pilot6.json`，同一 `teach_core.py`，每条最多 5 轮）：
+
+| 事实 | F 出厂 | G | N |
+|---|---|---|---|
+| 乳名索绎思 | ✗ | ✓ | ✓ |
+| 混血 | ✗ | ✗ | ✗ |
+| 身高189/体重82 | ✗ | ✓ | ✗ |
+| 黑发黑瞳 | ✗ | ✓ | ✓ |
+| 体温偏凉 | ✗ | ✗ | ✗ |
+| 百达翡丽 | ✗ | ✓ | ✗ |
+| 合计 | 0/6 | 4/6 | 2/6 |
+
+按 §5.3 判定：N 2/6，不满足 N ≥ 4/6，也不满足 N ≥ G+2，**不过**，没有进入全量课。
+
+原因（来自 N 课的服务日志 `core-serve.log`）：
+- §6 第二条风险应验了：事实已经用 `self_note` 写进用户轮，N 仍然回避。self 样例问答 96 次全部是回避句，没有一次复述事实。
+- 回避句收拢成了新模板："X，这个我想留个悬念"在训练集里只占 16/468，在课上占 47/96；"X这个话题，我就不接了/不展开了"也很常见。
+- 更糟的是，`slide_take.zig:139` 只在答成**出厂身份**时才退回用事实原句。回避句不触发这个退回，于是被当作"知道事实后的回答"拿去教：22 条这样的样例里，有 18 条教的就是回避本身（例："你多高？" → "身高这个话题，我就不接了。"）。pocket 在把模型往回避上推。
+- G 臂没学回避，只靠回放和私人问题把出厂模板削掉了一半（123→67），pilot 反而最好（4/6，F 是 0/6）。[推断] 拆模板确实帮了 Living Weights，但"回避"这种替代方式和"被告知时照说"互相冲突。
+
+可选的下一步（待明月定）：
+1. 以 G 为底座，直接上全量课（G 的 4/6 不在预登记判定里，只是对照臂的观测）；
+2. 修改 N 的训练数据，加入"用户轮里给了事实 → 照事实回答"的样例，让回避只在没被告知时出现；同时把 `slide_take` 的退回条件扩大到回避句；
+3. 两者都做，再跑一轮三臂 pilot。
+
+## 7. 前一版实测摘要（事实微调，已停用）
+
+| 轮 | 改动 | 事实 plain / think（182 问） | 普通请求 think | 备注 |
+|---|---|---|---|---|
+| ft1 | lr 5e-5、2 轮、长样本截到 2048 | 156 / 158 | 2 空、3 跑题 | 截断切掉 `</think>`，翻译题 thinking 循环 |
+| ft2 | 长样本不训 | 154 / 155 | 1 空、4 跑题 | "早上好！"thinking 循环 |
+| ft3 | 回放每轮两遍 | 151 / 153，出厂身份 1 次 | 过 | 其副本上 Living Weights 教新事实失败 |
+
+沿用的训练经验：lr 1e-4、3 轮过拟合（复读、合并后乱字），lr 5e-5、2 轮正常；截断会教出不收尾的推理，改为超长不训；回放 ×2 消除问候的 thinking 循环；训练显存约 17 GiB/1k token，不清缓存会被杀；自写训练循环是因 `mlx_lm` `ChatDataset` 不传 `enable_thinking`（`tuner/datasets.py:62`）；`fuse` 需补拷 `mtp-4bit.safetensors`、`chat_template.jinja`、`generation_config.json`、`LICENSE`。
+
+## 8. 需求对照
+
+| 原话片段（`需求原话.md`） | 本设计的落点 |
+|---|---|
+| "尽量不要靠微调来教事实……教事实不靠谱" | 训练数据不含任何事实（角色的、虚构的都没有）；E1 |
+| "微调主要学的是说话方式" | 只教"关于自己的问题怎样答"：第一人称、中性、不套模板；口吻另议（§1） |
+| "之前微调解决了模型无论问什么都回答 '我的名字是Nemotron' 这种问题，就挺好" | E2 |
+| （前文）"thinking交给以后的微调吧……也没必要强行学了" | 本轮不训无上下文的 thinking 自问，只记录（§1）；E3 保证 thinking 不崩 |
+| （前文）"保持事实简单"、只要求中文 | 事实仍按 Living Weights 课表；自问全中文 |
+| （前文）效果 4：设定渗入普通对话可接受 | E3 不判渗入 |
+| （前文）效果 3：中文人称可识别 | 已由 `self-mode.md` 完成（`firstPerson` 中文词表），本设计不改；E5 的课依赖它 |

@@ -46,6 +46,9 @@ def dodges(text):
 
 
 RANK, SCALE, LR, BATCH, TOKENS, SAVE_EVERY = 8, 20.0, float(os.environ.get("LR", 5e-5)), 8, 2048, 100
+# each question has a POOL of made-up answers and an epoch draws DRAW of them: arm V (3 answers, all seen twice) learnt
+# single answers by heart ("我姓滕，单名一个岫" to "你是谁？"; self-ft.md §6c)
+POOL, DRAW = 20, 3
 # the lesson's own wording (slide_prompts.zig self_note), put ahead of the question in the user's turn (askNoted)
 SELF_NOTE = "This is true of you, and you say it of yourself: \"{}\" Answer as yourself, in the first person, in Chinese, plainly."
 
@@ -82,9 +85,9 @@ def answers(out, core_path, eval_path):
     rows = jl_read(f"{DATA}/self_answers.jsonl")
     by = {}
     for r in rows: by.setdefault(r["q"], []).append(r["a"])
-    few = [q for q in qs if len(set(by.get(q, []))) != 3]
-    if few: sys.exit(f"{len(few)} questions lack three different answers, e.g. {few[:3]}")
-    # three answers to one question say three different values: the same name or height twice teaches it
+    few = [q for q in qs if len(set(by.get(q, []))) != len(by.get(q, [])) or len(by.get(q, [])) < POOL]
+    if few: sys.exit(f"{len(few)} questions lack {POOL} different answers, e.g. {few[:3]}")
+    # answers to one question say different values: the same name or height twice teaches it
     same = [q for q in qs for i, a in enumerate(by[q]) for b in by[q][i + 1:]
             if set(NAME.findall(a) + NUMBER.findall(a)) & set(NAME.findall(b) + NUMBER.findall(b))]
     if same: sys.exit(f"{len(same)} questions give one value twice, e.g. {same[:3]}")
@@ -102,7 +105,9 @@ def answers(out, core_path, eval_path):
         for n in NAME.findall(r["a"]): names[n] = names.get(n, 0) + 1
         for n in set(NUMBER.findall(r["a"])): nums[n] = nums.get(n, 0) + 1
         heads[r["a"][:2]] = heads.get(r["a"][:2], 0) + 1
-    worn = [n for n, k in names.items() if k > 2] + [n for n, k in nums.items() if k > 3] + [h for h, k in heads.items() if k > 0.04 * len(rows)]
+    # quotas scale with the pool: what one epoch sees (DRAW a question) is what could be learnt by heart
+    k = len(rows) / (3 * len(qs))
+    worn = [n for n, c in names.items() if c > 2 * k] + [n for n, c in nums.items() if c > 3 * k] + [h for h, c in heads.items() if c > 0.04 * len(rows)]
     if worn: sys.exit(f"said too often: {worn[:10]}")
     jl_write(f"{out}/self.jsonl", [sample(r["q"], r["a"]) for r in rows])
     print(f"answers: {len(rows)} answers to {len(qs)} questions")
@@ -180,13 +185,16 @@ def train(model_path, out, epochs, resume, no_self):
     own = [] if no_self else jl_read(f"{out}/self.jsonl")
     rows = own + jl_read(f"{out}/replay.jsonl") * replays + jl_read(f"{out}/private.jsonl")
     print(f"{len(own)} self answers, {len(rows) - len(own)} replay and private samples")
-    data = []
-    for r in rows:
+    data, pool = [], {}
+    for i, r in enumerate(rows):
         pr, full = render(tok, r["q"], r["a"], r["r"], think=r["r"] is not None)
         # longer replays are left out, not cut: memory (17 GiB a 1k tokens), and a thinking one cut before its
         # </think> taught reasoning that never closes (ft1: "[Final Output] …" looping to the token limit)
-        if len(full) <= TOKENS: data.append((full, len(pr)))
+        if len(full) <= TOKENS:
+            if i < len(own): pool.setdefault(r["q"], []).append(len(data))
+            data.append((full, len(pr)))
     print(f"{len(rows) - len(data)} samples over {TOKENS} tokens left out")
+    drawn = {k for ks in pool.values() for k in ks}
     model.freeze()
     linear_to_lora_layers(model, -1, {"rank": RANK, "scale": SCALE, "dropout": 0.0})
     adapter, progress = f"{out}/adapters.safetensors", f"{out}/progress.json"
@@ -209,8 +217,10 @@ def train(model_path, out, epochs, resume, no_self):
     opt = optim.Adam(learning_rate=LR)
 
     def batches(ep):  # shuffled, at most BATCH samples and TOKENS padded tokens a batch (a long reply goes alone)
-        order = list(range(len(data)))
-        random.Random(ep).shuffle(order)
+        # self answers: a fresh DRAW of each question's pool every epoch, so no one made-up answer is seen twice
+        rnd = random.Random(ep)
+        order = [k for k in range(len(data)) if k not in drawn] + [k for ks in pool.values() for k in rnd.sample(ks, min(DRAW, len(ks)))]
+        rnd.shuffle(order)
         out_, cur = [], []
         for k in order:
             if cur and (len(cur) == BATCH or max(len(data[j][0]) for j in cur + [k]) * (len(cur) + 1) > TOKENS):

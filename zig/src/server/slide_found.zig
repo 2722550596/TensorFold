@@ -25,18 +25,19 @@ pub fn facts(srv: *Server, cx: *Cx, text: []const u8, source: []const u8, gone: 
     return reversed(srv, cx, out.items, text, gone);
 }
 
-/// The questions a caller wrote for a fact: the ones learned, and the ones only asked after each round (empty: the model writes them).
-pub const Wordings = struct { questions: []const []const u8 = &.{}, unseen: []const []const u8 = &.{} };
+/// The questions a caller wrote for a fact: the ones learned, and the ones only asked after each round (empty: the model
+/// writes them); and `known`, other true facts of the same subject, told beside it when its answers are written.
+pub const Wordings = struct { questions: []const []const u8 = &.{}, unseen: []const []const u8 = &.{}, known: []const []const u8 = &.{} };
 
 /// A fact as the caller gave it: its line and its questions.
 pub const Given = struct { text: []const u8, wordings: Wordings = .{} };
 
-/// Whether `x` is a fact as the caller may give it: a line, or {"text", "questions", "unseen"} with lists of lines.
+/// Whether `x` is a fact as the caller may give it: a line, or {"text", "questions", "unseen", "known"} with lists of lines.
 pub fn shaped(x: Value) bool {
     if (x.str() != null) return true;
     if (x != .object) return false;
     if (x.strField("text") == null) return false;
-    for ([_][]const u8{ "questions", "unseen" }) |key| if (x.field(key)) |v| {
+    for ([_][]const u8{ "questions", "unseen", "known" }) |key| if (x.field(key)) |v| {
         for (v.items() orelse return false) |q| if (q.str() == null) return false;
     };
     return true;
@@ -58,7 +59,7 @@ pub fn given(cx: *Cx, xs: []const Value, self: bool) ![]const Given {
             if (!std.mem.eql(u8, fact, had.text)) continue;
             if (x.str() == null) log.line("slide: \"{s}\" is given again, so its questions there are left out", .{fact});
             break;
-        } else try out.append(a, .{ .text = fact, .wordings = .{ .questions = try questionLines(a, x.field("questions")), .unseen = try questionLines(a, x.field("unseen")) } });
+        } else try out.append(a, .{ .text = fact, .wordings = .{ .questions = try questionLines(a, x.field("questions")), .unseen = try questionLines(a, x.field("unseen")), .known = try questionLines(a, x.field("known")) } });
     }
     return out.items;
 }
@@ -242,14 +243,14 @@ test "a caller's fact is a line or an object of lines, its questions kept with t
     defer arena.deinit();
     const a = arena.allocator();
     const body = switch (try @import("json.zig").parse(a,
-        \\[{"text": "我的生日是1月15日", "questions": ["你生日是哪天？", " "], "unseen": ["你几号过生日？"]},
+        \\[{"text": "我的生日是1月15日", "questions": ["你生日是哪天？", " "], "unseen": ["你几号过生日？"], "known": ["我今年28岁"]},
         \\ "我的生日是1月15日", "我今年28岁", {"text": "你的猫叫什么"}]
     )) {
         .ok => |v| v,
         .err => return error.TestUnexpectedResult,
     };
     for (body.items().?) |x| try std.testing.expect(shaped(x));
-    for ([_][]const u8{ "3", "{\"questions\": []}", "{\"text\": \"我28岁\", \"unseen\": \"你几岁？\"}", "{\"text\": \"我28岁\", \"questions\": [1]}" }) |bad| {
+    for ([_][]const u8{ "3", "{\"questions\": []}", "{\"text\": \"我28岁\", \"unseen\": \"你几岁？\"}", "{\"text\": \"我28岁\", \"questions\": [1]}", "{\"text\": \"我28岁\", \"known\": \"我是男性\"}" }) |bad| {
         const v = switch (try @import("json.zig").parse(a, bad)) {
             .ok => |v| v,
             .err => return error.TestUnexpectedResult,
@@ -262,5 +263,6 @@ test "a caller's fact is a line or an object of lines, its questions kept with t
     try std.testing.expectEqualStrings("我的生日是1月15日", got[0].text);
     try std.testing.expectEqual(@as(usize, 1), got[0].wordings.questions.len);
     try std.testing.expectEqualStrings("你几号过生日？", got[0].wordings.unseen[0]);
+    try std.testing.expectEqualStrings("我今年28岁", got[0].wordings.known[0]);
     try std.testing.expectEqual(@as(usize, 0), got[1].wordings.questions.len);
 }

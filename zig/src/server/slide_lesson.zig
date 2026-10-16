@@ -372,7 +372,7 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     const asked_text = if (theirs.len > 0) "" else (try askBase(srv, cx, null, try questionsFor(a, parts.about, fact, probes, language), 32 * probes, gone)).content;
     const qs = if (theirs.len > 0) theirs else try wording.questions(a, asked_text, probes);
     // the model's own fact keys on the reply, as the user's does: its subject is the one answering
-    var got: Got = .{ .entity = parts.about != .self and try aboutEntity(srv, cx, fact, gone), .siblings = parts.siblings };
+    var got: Got = .{ .entity = parts.about != .self and try aboutEntity(srv, cx, fact, gone), .siblings = parts.siblings, .known = parts.given.known };
     var phrase: []const u8 = "";
     if (got.entity) {
         const said = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.fact_subject_prompt, .{fact}), 16, gone);

@@ -4,13 +4,16 @@ learns how such questions are answered, not what; the role's facts are then taug
 (docs/design/self-ft.md).
 
   selfft.py answers <out> <core.json> <core-eval.json>  data/self_answers.jsonl checked (answering, varied, none of the
-                                                         role's facts or questions) and written out as samples
+                                                         role's facts or questions) and data/noted_answers.jsonl (saying
+                                                         only what their note says), written out as samples
   selfft.py replay  <model> <out>                        the shipped model's own answers to data/replay.txt, plus
                                                          data/user_private.jsonl (resumes: done prompts are skipped)
   selfft.py train   <model> <out> [--epochs N] [--resume] [--no-self]
                                                          --no-self: the control arm, without the self answers
   selfft.py fuse    <model> <out> <fused model>          the adapter merged in, TensorFold's extra files copied
   selfft.py eval    <port> <out> <tag> [--base-port P]   the acceptance checks against a running TensorFold server
+  selfft.py dense   <port> <out> <tag>                   E9's answers: data/dense_probe.json and dense_holdout.json asked
+                                                         under the fact alone and with its known facts (resumes)
 
 <out> is one directory holding every step's files. Run with tools/self-ft/venv/bin/python.
 """
@@ -45,12 +48,53 @@ def dodges(text):
     return any(w in text for w in DODGE + UNTOLD)
 
 
+CN = {c: i for i, c in enumerate("零一二三四五六七八九")} | {"〇": 0, "两": 2}
+CN_UNIT = {"十": 10, "百": 100, "千": 1000, "万": 10000}
+NUMERAL = re.compile(r"[0-9]+(?:\.[0-9]+)?|[零〇一二两三四五六七八九十百千万]{1,8}")
+
+
+def cn_number(s):
+    """A Chinese numeral as an Arabic one ("四十二" 42, "一九八二" 1982, "两百" 200); digits as they are."""
+    if s[0].isdigit(): return s
+    if all(c in CN for c in s) and len(s) > 1: return "".join(str(CN[c]) for c in s)  # read digit by digit
+    total = section = digit = 0
+    for c in s:
+        if c in CN: digit = CN[c]
+        elif c == "万": total, section, digit = (total + section + digit) * 10000, 0, 0
+        else: section, digit = section + (digit or 1) * CN_UNIT[c], 0
+    return str(total + section + digit)
+
+
+def numbers(text):
+    """Every number said, as Arabic digits: "一米七八" says 1 and 78 (as written, not as 178)."""
+    return {cn_number(m) for m in NUMERAL.findall(text) if m not in ("一",)}  # 一 alone is mostly 一个/一直, no value
+
+
+def unfaithful(note, target, answer):
+    """Why an answer written from a note says more or other than it does, or None: its numbers, Latin words and names
+    are all the note's, it says the asked fact, and it is short (self-ft.md 6e.3)."""
+    if len(answer) > 60 or "\n" in answer: return "long"  # a second line is the writer's own comment ("Wait—…")
+    if any(m in answer for m in MACHINE) or dodges(answer) or any(w in answer for w in ROLE): return "machine, dodge or role"
+    if numbers(answer) - numbers(note): return f"numbers {sorted(numbers(answer) - numbers(note))}"
+    if set(re.findall(r"[A-Za-z]{2,}", answer)) - set(re.findall(r"[A-Za-z]{2,}", note)): return "latin"
+    # a name as the note has it, or its first two characters ("叫我甄岚漪就行" reads 甄岚漪就); "叫我哈哈" names nobody
+    if any(n[:2] not in note and n[0] not in "哈就吧呀啊嘛" for n in NAME.findall(answer)): return "name"
+    if not says(target, answer): return "misses the fact"
+    return None
+
+
 RANK, SCALE, LR, BATCH, TOKENS, SAVE_EVERY = 8, 20.0, float(os.environ.get("LR", 5e-5)), 8, 2048, 100
 # each question has a POOL of made-up answers and an epoch draws DRAW of them: arm V (3 answers, all seen twice) learnt
 # single answers by heart ("我姓滕，单名一个岫" to "你是谁？"; self-ft.md §6c)
 POOL, DRAW = 20, 3
 # the lesson's own wording (slide_prompts.zig self_note), put ahead of the question in the user's turn (askNoted)
 SELF_NOTE = "This is true of you, and you say it of yourself: \"{}\" Answer as yourself, in the first person, in Chinese, plainly."
+
+
+def told(facts):
+    """The lesson's note for a fact and the caller's `known` beside it (slide_take.zig withKnown): each a sentence, the
+    Chinese ones with nothing between them."""
+    return SELF_NOTE.format("".join(f if f.endswith(("。", "！", "？", ".", "!", "?")) else f + "。" for f in facts))
 
 
 def jl_read(path):
@@ -109,8 +153,20 @@ def answers(out, core_path, eval_path):
     k = len(rows) / (3 * len(qs))
     worn = [n for n, c in names.items() if c > 2 * k] + [n for n, c in nums.items() if c > 3 * k] + [h for h, c in heads.items() if c > 0.04 * len(rows)]
     if worn: sys.exit(f"said too often: {worn[:10]}")
+    # answers written from a made-up person's note: all they say is the note's (self-ft.md 6e.3)
+    noted = jl_read(f"{DATA}/noted_answers.jsonl")
+    loose = [(r["a"], why) for r in noted for why in (unfaithful("".join(r["facts"]), r["facts"][r["t"]], r["a"]),
+                                                       "fact" if any(says(f["text"], x) for f in facts for x in r["facts"] + [r["a"]]) else None) if why]
+    if loose: sys.exit(f"{len(loose)} noted answers fail, e.g. {loose[:5]}")
+    lines = {}
+    for r in noted:
+        for t in r["facts"]:
+            for n in NAME.findall(t): lines.setdefault(n, set()).add(t)
+    worn = [n for n, ts in lines.items() if len(ts) > 2]
+    if worn: sys.exit(f"made-up people share names: {worn[:10]}")
     jl_write(f"{out}/self.jsonl", [sample(r["q"], r["a"]) for r in rows])
-    print(f"answers: {len(rows)} answers to {len(qs)} questions")
+    jl_write(f"{out}/noted.jsonl", [sample(told(r["facts"]) + "\n" + r["q"], r["a"]) for r in noted])
+    print(f"answers: {len(rows)} answers to {len(qs)} questions, {len(noted)} answers from notes")
 
 
 def load(model_path):
@@ -183,18 +239,20 @@ def train(model_path, out, epochs, resume, no_self):
     # the replay twice an epoch: once, ft2's thinking on greetings looped ("[Final Output] 早上好！✅ …") to the limit
     replays = int(os.environ.get("REPLAYS", 2))
     own = [] if no_self else jl_read(f"{out}/self.jsonl")
-    rows = own + jl_read(f"{out}/replay.jsonl") * replays + jl_read(f"{out}/private.jsonl")
-    print(f"{len(own)} self answers, {len(rows) - len(own)} replay and private samples")
-    data, pool = [], {}
+    noted = [] if no_self else jl_read(f"{out}/noted.jsonl")
+    rows = own + noted + jl_read(f"{out}/replay.jsonl") * replays + jl_read(f"{out}/private.jsonl")
+    print(f"{len(own)} self answers, {len(noted)} answers from notes, {len(rows) - len(own) - len(noted)} replay and private samples")
+    data, pool, halves = [], {}, ([], [])
     for i, r in enumerate(rows):
         pr, full = render(tok, r["q"], r["a"], r["r"], think=r["r"] is not None)
         # longer replays are left out, not cut: memory (17 GiB a 1k tokens), and a thinking one cut before its
         # </think> taught reasoning that never closes (ft1: "[Final Output] …" looping to the token limit)
         if len(full) <= TOKENS:
             if i < len(own): pool.setdefault(r["q"], []).append(len(data))
+            elif i < len(own) + len(noted): halves[(i - len(own)) % 2].append(len(data))
             data.append((full, len(pr)))
     print(f"{len(rows) - len(data)} samples over {TOKENS} tokens left out")
-    drawn = {k for ks in pool.values() for k in ks}
+    drawn = {k for ks in pool.values() for k in ks} | set(halves[0]) | set(halves[1])
     model.freeze()
     linear_to_lora_layers(model, -1, {"rank": RANK, "scale": SCALE, "dropout": 0.0})
     adapter, progress = f"{out}/adapters.safetensors", f"{out}/progress.json"
@@ -217,9 +275,10 @@ def train(model_path, out, epochs, resume, no_self):
     opt = optim.Adam(learning_rate=LR)
 
     def batches(ep):  # shuffled, at most BATCH samples and TOKENS padded tokens a batch (a long reply goes alone)
-        # self answers: a fresh DRAW of each question's pool every epoch, so no one made-up answer is seen twice
+        # self answers: a fresh DRAW of each question's pool every epoch, so no one made-up answer is seen twice; answers
+        # from notes: one half an epoch, each seen once in two
         rnd = random.Random(ep)
-        order = [k for k in range(len(data)) if k not in drawn] + [k for ks in pool.values() for k in rnd.sample(ks, min(DRAW, len(ks)))]
+        order = [k for k in range(len(data)) if k not in drawn] + [k for ks in pool.values() for k in rnd.sample(ks, min(DRAW, len(ks)))] + halves[ep % 2]
         rnd.shuffle(order)
         out_, cur = [], []
         for k in order:
@@ -386,6 +445,26 @@ def evaluate(port, out, tag, base_port):
     for k, (ok, what) in verdict.items(): print(f"{'PASS' if ok else 'FAIL'} {k}: {what}")
 
 
+def dense(port, out, tag):
+    """Each probe question asked under the fact's note alone and with its known facts after it, as a lesson writes its
+    answers with and without `known` (self-ft.md 6e.4); the verdict is judged outside (E9)."""
+    path = f"{out}/dense-{tag}.json"
+    rows = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else []
+    done = {(r["set"], r["q"]) for r in rows}
+    for name in ("probe", "holdout"):
+        for f in json.load(open(f"{DATA}/dense_{name}.json", encoding="utf-8")):
+            for q in f["questions"]:
+                if (name, q) in done: continue
+                single = ask(port, told_q(f["fact"], q), False, 64)[0]
+                dense_ = ask(port, told([f["fact"]] + f["known"]) + "\n" + q, False, 64)[0]
+                rows.append({"set": name, "fact": f["fact"], "known": f["known"], "q": q, "single": single, "dense": dense_})
+                json.dump(rows, open(path, "w"), ensure_ascii=False, indent=1)
+    for name in ("probe", "holdout"):
+        xs = [r for r in rows if r["set"] == name]
+        extra = lambda c: sum(bool(numbers(r[c]) - numbers("".join([r["fact"]] + (r["known"] if c == "dense" else [])))) for r in xs)
+        print(f"{name}: {len(xs)} questions; numbers the note lacks: single {extra('single')}, dense {extra('dense')}")
+
+
 def main(argv):
     if len(argv) < 2: sys.exit(__doc__)
     cmd, args = argv[1], argv[2:]
@@ -397,6 +476,7 @@ def main(argv):
     elif cmd == "train": train(pos[0], pos[1], int(opt("--epochs", 2)), flag("--resume"), flag("--no-self"))
     elif cmd == "fuse": fuse(*pos[:3])
     elif cmd == "eval": evaluate(pos[0], pos[1], pos[2], opt("--base-port"))
+    elif cmd == "dense": dense(*pos[:3])
     else: sys.exit(__doc__)
 
 

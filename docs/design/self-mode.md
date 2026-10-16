@@ -657,7 +657,8 @@ core 第 1–2 轮实测（`~/elias-teach/core-serve-r1.log`、`core-serve-r2.lo
 - 答案仍由模型在 note 下作答，`firstTelling` 等处理不变；"只教事实，不教口吻"不变。成课门槛 `min_probes` 不变，不足就报 `too few clean answers`。
   例外：调用方问法的回答不合格时（没写完、不是以自己的口吻、没说出事实里问题缺的词），**以事实原句作答案**（补上句号），并记日志。
   实测中，"你几月几号出生的？"这类问法即使带着 note，模型也回答"我的名字是Nemotron。"；按原规则会被丢掉，结果生日那条只剩 4 条问法可学。
-- 格式错误返回 400 `facts must be strings or {text, questions, unseen} objects`：项既不是字符串也不是对象、对象缺 `text`，或 `questions`/`unseen` 不是字符串列表，都算格式错误。
+- `known`（`self-ft.md` 6e 加）：关于同一主体的其他真实事实。只用在写样例回答的那一问：note 变成"事实 + `known`"（各补句号后连接，事实在前）；短答案、各项检查、退回原句仍只用这条事实。不给或空列表时与原来逐字相同。
+- 格式错误返回 400 `facts must be strings or {text, questions, unseen, known} objects`：项既不是字符串也不是对象、对象缺 `text`，或 `questions`/`unseen`/`known` 不是字符串列表，都算格式错误。
   去重按 `text` 进行，先出现的那条保留；后面重复那条如果是对象，它带的问法会被舍去并记日志。
   全部事实都被舍去时，`failed` 消息为 `none of the given facts can be learned: nothing was learned`。
 - 出题规则（`core.json` 每条写 16 条 `questions`、4 条 `unseen`）：

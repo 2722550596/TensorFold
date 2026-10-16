@@ -30,6 +30,7 @@ pub const Got = struct {
     words: []const []const u8 = &.{}, // the words its questions name that subject by (from the fact itself)
     named: []const []const u8 = &.{}, // of those, its proper names, which a question must say when it has any
     siblings: []const []const u8 = &.{}, // every fact told with it: a question one of them answers is theirs
+    known: []const []const u8 = &.{}, // the caller's other true facts of its subject, told beside it when answers are written
     pairs: std.ArrayList(api.Example) = .empty,
     thinking: std.ArrayList(?api.Example) = .empty, // each pair's thinking answer: the recall line, then the answer
     refs: std.ArrayList(Held) = .empty,
@@ -64,6 +65,7 @@ pub fn take(srv: *Server, cx: *Cx, got: *Got, fact: []const u8, f: usize, qs: []
         words: []const []const u8,
         named: []const []const u8,
         siblings: []const []const u8,
+        known: []const []const u8,
         fact: []const u8,
         f: usize,
         qs: []const []const u8,
@@ -77,10 +79,10 @@ pub fn take(srv: *Server, cx: *Cx, got: *Got, fact: []const u8, f: usize, qs: []
 
         pub fn run(j: *const @This(), i: usize) !void {
             var jcx: Cx = .{ .a = j.a };
-            j.out[i] = try write(j.srv, &jcx, j.words, j.named, j.siblings, j.fact, j.f, j.qs[i], j.end, j.thinking, j.about, j.judge, j.trusted, j.gone);
+            j.out[i] = try write(j.srv, &jcx, j.words, j.named, j.siblings, j.known, j.fact, j.f, j.qs[i], j.end, j.thinking, j.about, j.judge, j.trusted, j.gone);
         }
     };
-    try side.each(fresh.items.len, &Job{ .srv = srv, .a = a, .words = got.words, .named = got.named, .siblings = got.siblings, .fact = fact, .f = f, .qs = fresh.items, .end = end, .thinking = thinking, .about = about, .judge = !got.unjudged, .trusted = got.trusted, .gone = gone, .out = out });
+    try side.each(fresh.items.len, &Job{ .srv = srv, .a = a, .words = got.words, .named = got.named, .siblings = got.siblings, .known = got.known, .fact = fact, .f = f, .qs = fresh.items, .end = end, .thinking = thinking, .about = about, .judge = !got.unjudged, .trusted = got.trusted, .gone = gone, .out = out });
     for (out) |w| if (w) |x| {
         try got.pairs.append(a, x.ex);
         try got.thinking.append(a, x.think);
@@ -90,7 +92,7 @@ pub fn take(srv: *Server, cx: *Cx, got: *Got, fact: []const u8, f: usize, qs: []
 }
 
 /// A question written with the answer the model gives it from the fact, unless it gives that answer away or misses it.
-fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []const u8, siblings: []const []const u8, fact: []const u8, f: usize, q: []const u8, end: []const u32, thinking: bool, about: About, judge: bool, trusted: bool, gone: anytype) !?Written {
+fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []const u8, siblings: []const []const u8, known: []const []const u8, fact: []const u8, f: usize, q: []const u8, end: []const u32, thinking: bool, about: About, judge: bool, trusted: bool, gone: anytype) !?Written {
     const a = cx.a;
     const own_value = wording.yesNo(q) and wording.tells(fact, "", "", q); // "Do I like red?" after "I like red."
     if (judge and own_value) {
@@ -116,7 +118,9 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
     }
     if (try siblingAnswers(srv, cx, siblings, fact, q, about, gone)) return null;
     const note = try noteFor(a, about, fact);
-    const reply = try askNoted(srv, cx, note, q, 64, gone);
+    // the answer is written with the caller's other facts of its subject at hand, so what it adds is theirs, not made
+    // up (self-ft.md 6e); its short answer and every check stay on the fact alone
+    const reply = try askNoted(srv, cx, if (known.len > 0) try noteFor(a, about, try withKnown(a, fact, known)) else note, q, 64, gone);
     const whole = std.mem.trim(u8, reply.content, " \t\r\n");
     // a bare answer the model finished on its own ("Odile Marchetti", "2017") is the whole reply as it stands
     const bare = std.mem.eql(u8, reply.finish_reason, "stop") and whole.len > 0 and std.mem.indexOfScalar(u8, whole, '\n') == null and wording.words(whole) <= bare_words;
@@ -165,6 +169,25 @@ pub fn sentence(a: Allocator, fact: []const u8) ![]const u8 {
     for ([_][]const u8{ "。", "！", "？", ".", "!", "?" }) |mark| if (std.mem.endsWith(u8, fact, mark)) return fact;
     const wide = for (fact) |c| (if (c >= 0x80) break true) else false;
     return std.mem.concat(a, u8, &.{ fact, if (wide) "。" else "." });
+}
+
+/// The fact and then `known`, each a sentence, as one note's text.
+fn withKnown(a: Allocator, fact: []const u8, known: []const []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for ([_][]const []const u8{ &.{fact}, known }) |xs| for (xs) |x| {
+        const s = try sentence(a, x);
+        // English sentences take a space between them; Chinese ones none
+        if (out.items.len > 0 and s[0] < 0x80) try out.append(a, ' ');
+        try out.appendSlice(a, s);
+    };
+    return out.items;
+}
+
+test "a fact told with the caller's other facts: each a sentence, the fact first" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("我身高189厘米。我是男性。我今年28岁！", try withKnown(arena.allocator(), "我身高189厘米", &.{ "我是男性", "我今年28岁！" }));
+    try std.testing.expectEqualStrings("I am tall. I am 28.", try withKnown(arena.allocator(), "I am tall", &.{"I am 28"}));
 }
 
 /// The note a fact's answers are written under (told by the user, read in a document, or the model's own),

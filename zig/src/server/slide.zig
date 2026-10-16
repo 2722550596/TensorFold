@@ -72,9 +72,9 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         .ok => |v| v,
         .err => |message| return refuse(conn, a, 400, message),
     };
-    // "facts": the caller's own list, each line whole (or {"text", "questions", "unseen"}), learned as given instead of
-    // found in a text
-    const bad_facts = "facts must be strings or {text, questions, unseen} objects";
+    // "facts": the caller's own list, each line whole (or {"text", "questions", "unseen", "known"}), learned as given
+    // instead of found in a text
+    const bad_facts = "facts must be strings or {text, questions, unseen, known} objects";
     const given = if (body.field("facts")) |f| f.items() orelse return refuse(conn, a, 400, bad_facts) else null;
     if (given) |xs| for (xs) |x| if (!found.shaped(x)) return refuse(conn, a, 400, bad_facts);
     const text = if (given != null) "" else body.strField("text") orelse return refuse(conn, a, 400, "text is required");

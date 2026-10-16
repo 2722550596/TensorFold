@@ -8,8 +8,9 @@ learns how such questions are answered, not what; the role's facts are then taug
                                                          only what their note says), written out as samples
   selfft.py replay  <model> <out>                        the shipped model's own answers to data/replay.txt, plus
                                                          data/user_private.jsonl (resumes: done prompts are skipped)
-  selfft.py train   <model> <out> [--epochs N] [--resume] [--no-self]
-                                                         --no-self: the control arm, without the self answers
+  selfft.py train   <model> <out> [--epochs N] [--resume] [--no-self | --no-made-up]
+                                                         --no-self: the control arm, without either kind of self answer;
+                                                         --no-made-up: without the answers made up with no note (arm H)
   selfft.py fuse    <model> <out> <fused model>          the adapter merged in, TensorFold's extra files copied
   selfft.py eval    <port> <out> <tag> [--base-port P]   the acceptance checks against a running TensorFold server
   selfft.py dense   <port> <out> <tag>                   E9's answers: data/dense_probe.json and dense_holdout.json asked
@@ -231,14 +232,14 @@ def unshipped(text):
     return "".join(p for p in parts if not any(w in p for w in SHIPPED + ["语言模型", "AI助手", "人工智能助手"])).strip()
 
 
-def train(model_path, out, epochs, resume, no_self):
+def train(model_path, out, epochs, resume, no_self, no_made_up):
     import mlx.core as mx, mlx.nn as nn, mlx.optimizers as optim
     from mlx.utils import tree_flatten
     from mlx_lm.tuner.utils import linear_to_lora_layers
     model, tok = load(model_path)
     # the replay twice an epoch: once, ft2's thinking on greetings looped ("[Final Output] 早上好！✅ …") to the limit
     replays = int(os.environ.get("REPLAYS", 2))
-    own = [] if no_self else jl_read(f"{out}/self.jsonl")
+    own = [] if no_self or no_made_up else jl_read(f"{out}/self.jsonl")
     noted = [] if no_self else jl_read(f"{out}/noted.jsonl")
     rows = own + noted + jl_read(f"{out}/replay.jsonl") * replays + jl_read(f"{out}/private.jsonl")
     print(f"{len(own)} self answers, {len(noted)} answers from notes, {len(rows) - len(own) - len(noted)} replay and private samples")
@@ -473,7 +474,7 @@ def main(argv):
     pos = [a for i, a in enumerate(args) if not a.startswith("--") and (i == 0 or not args[i - 1] in ("--epochs", "--base-port"))]
     if cmd == "answers": answers(*pos[:3])
     elif cmd == "replay": replay(*pos[:2])
-    elif cmd == "train": train(pos[0], pos[1], int(opt("--epochs", 2)), flag("--resume"), flag("--no-self"))
+    elif cmd == "train": train(pos[0], pos[1], int(opt("--epochs", 2)), flag("--resume"), flag("--no-self"), flag("--no-made-up"))
     elif cmd == "fuse": fuse(*pos[:3])
     elif cmd == "eval": evaluate(pos[0], pos[1], pos[2], opt("--base-port"))
     elif cmd == "dense": dense(*pos[:3])

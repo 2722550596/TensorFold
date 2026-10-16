@@ -96,6 +96,7 @@ pub const Model = struct {
         };
         errdefer m.weights.deinit();
         try learned.attach(&m.weights, residuals);
+        if (m.config.pocket > 0) try wts.loadGates(&m.weights, allocator, io, dir, m.config);
     }
 
     pub fn deinit(self: *Model) void {

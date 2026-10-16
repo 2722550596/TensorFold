@@ -38,6 +38,17 @@ pub fn roleOf(g: i32) ?Role {
     return std.enums.fromInt(Role, @as(u2, @intCast(@mod(g, 4))));
 }
 
+/// Each fact's detect neurons among `marks`, added into `counts` (the means' divisors); whether any mark is not free.
+pub fn tally(marks: []const i32, counts: *[max_facts]f32) bool {
+    var gated = false;
+    for (marks) |g| {
+        if (g < 0) continue;
+        gated = true;
+        if (roleOf(g) == .detect) counts[factOf(g).?] += 1;
+    }
+    return gated;
+}
+
 /// The row gate of row `r` in a sequence whose decision row is `decide` (null: none) and whose decided fact is `fact`.
 pub fn trainRow(r: usize, decide: ?usize, fact: i32) i32 {
     const d = decide orelse return row_none;

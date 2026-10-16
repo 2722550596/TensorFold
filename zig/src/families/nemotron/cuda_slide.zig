@@ -103,11 +103,7 @@ const Host = struct {
             defer w.gpa.free(marks);
             try o.download(std.mem.sliceAsBytes(marks), p.gates);
             try e.stream.synchronize();
-            for (marks) |mk| {
-                if (mk < 0) continue;
-                gated = true;
-                if (pocket_gate.roleOf(mk) == .detect) counts[pocket_gate.factOf(mk).?] += 1;
-            }
+            if (pocket_gate.tally(marks, &counts)) gated = true;
         }
         try o.upload(g.detects, std.mem.sliceAsBytes(&counts));
         g.gated = gated;

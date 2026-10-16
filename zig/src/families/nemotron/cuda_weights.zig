@@ -11,6 +11,7 @@ const Source = @import("cuda_source.zig").Source;
 const host4 = core.affine4_host;
 const modelopt = @import("cuda_modelopt.zig");
 const pocket_gate = @import("pocket_gate.zig");
+const pocket_shards = @import("pocket_shards.zig");
 const lesson_route = @import("lesson_route.zig");
 
 pub const QLinear = kern.QLinear;
@@ -507,6 +508,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, 
         }
         w.blocks[i] = b;
     }
+    if (c.pocket > 0) try loadGates(gpa, io, &L, dir);
     if (c.format == .modelopt) w.embed = try modelopt.embed(&L, &ck, c) else {
         const emb = try ck.get("backbone.embeddings.weight");
         w.embed = .{
@@ -527,6 +529,26 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, 
     try src.flush();
     try ops.s.synchronize();
     return w;
+}
+
+/// Every layer's pocket gate marks as `dir`'s gates file saved them (design §11.18 item 8), and each fact's detect count
+/// with them; marks stay free where the file has none. Without them a taught pocket acts on every row, its facts never latched.
+fn loadGates(gpa: std.mem.Allocator, io: std.Io, L: *Loader, dir: []const u8) !void {
+    if (L.w.gate == null) return;
+    const g = &L.w.gate.?;
+    var counts: [pocket_gate.max_facts]f32 = @splat(0);
+    for (L.w.blocks, 0..) |blk, l| {
+        if (blk.kind != .moe) continue;
+        const p = blk.moe.pocket orelse continue;
+        const marks = try gpa.alloc(i32, p.n);
+        defer gpa.free(marks);
+        try pocket_shards.readGates(gpa, io, dir, p.n, l, marks);
+        try L.ops.upload(p.gates, std.mem.sliceAsBytes(marks));
+        try L.ops.s.synchronize();
+        if (pocket_gate.tally(marks, &counts)) g.gated = true;
+    }
+    try L.ops.upload(g.detects, std.mem.sliceAsBytes(&counts));
+    try L.ops.s.synchronize();
 }
 
 fn loadMtp(gpa: std.mem.Allocator, io: std.Io, L: *Loader, main: *core.Checkpoint, dir: []const u8, c: Config) !void {

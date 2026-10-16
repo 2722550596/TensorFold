@@ -6,6 +6,7 @@ const row = @import("../../core/row_projection.zig");
 const host4 = @import("../../core/affine4_host.zig");
 const cfg = @import("config.zig");
 const pocket_gate = @import("pocket_gate.zig");
+const pocket_shards = @import("pocket_shards.zig");
 const lesson_route = @import("lesson_route.zig");
 
 const Tensor = ckpt.Tensor;
@@ -129,14 +130,22 @@ pub fn refreshGate(w: *Weights, layers: usize) void {
     @memset(counts, 0);
     var gated = false;
     for (w.layers[0..layers]) |lay| switch (lay) {
-        .moe => |mo| if (mo.pocket) |p| for (p.gates.slice(i32, p.used)) |mark| {
-            if (mark < 0) continue;
-            gated = true;
-            if (pocket_gate.roleOf(mark) == .detect) counts[pocket_gate.factOf(mark).?] += 1;
+        .moe => |mo| if (mo.pocket) |p| {
+            if (pocket_gate.tally(p.gates.slice(i32, p.used), counts[0..pocket_gate.max_facts])) gated = true;
         },
         else => {},
     };
     g.gated = gated;
+}
+
+/// Every layer's pocket gate marks as `dir`'s gates file saved them (design §11.18 item 8), then the gate recounted; marks
+/// stay free where the file has none. Without them a taught pocket acts on every row, its facts never latched.
+pub fn loadGates(w: *Weights, gpa: std.mem.Allocator, io: std.Io, dir: []const u8, c: cfg.Config) !void {
+    for (w.layers[0..c.layers], 0..) |lay, l| switch (lay) {
+        .moe => |mo| if (mo.pocket) |p| try pocket_shards.readGates(gpa, io, dir, c.pocket, l, p.gates.slice(i32, c.pocket)),
+        else => {},
+    };
+    refreshGate(w, c.layers);
 }
 
 const Builder = struct {
